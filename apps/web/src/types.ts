@@ -128,7 +128,7 @@ export interface WorkflowEvent {
 
 export interface CanvasElementState {
   id: string;
-  kind: "image" | "video" | "html" | "text" | "group" | "prompt";
+  kind: "image" | "video" | "html" | "text" | "group" | "prompt" | "solution" | "solution-prompt";
   x: number;
   y: number;
   width: number;
@@ -139,6 +139,11 @@ export interface CanvasElementState {
   role?: string;
   taskId?: string;
   outputTaskId?: string;
+  versionId?: string;
+  operation?: "revise" | "recompose" | "replace" | "fuse" | "split";
+  outputCount?: number;
+  replacement?: string;
+  sourceNotes?: Record<string, string>;
 }
 
 export interface CanvasState {

@@ -83,3 +83,17 @@ test('exhibition normalization rejects incomplete, ambiguous or non-prose surrou
   '<!-- wrapper -->\n'+html,
  ]) assert.throws(()=>normalizeShowcaseHtml(text),/complete HTML/,text);
 });
+
+test('version pages authorize CSS, hidden media, responsive sources and local links against their own images', async () => {
+  const { validateVersionShowcaseResources } = await import('../dist/showcase.js');
+  const generated = { hero: { path: 'artifacts/hero.png', digest: '' } };
+  assert.doesNotThrow(() => validateVersionShowcaseResources('<style>main{background:url("../artifacts/hero.png")}</style><img srcset="../artifacts/hero.png 2x"><a href="https://example.org/reference">Reference</a>', generated));
+  for (const html of [
+    '<style>main{background:url("../artifacts/unlisted.png")}</style>',
+    '<span style="background:u\\72 l(../artifacts/unlisted.png)">Hero</span>',
+    '<img hidden src="../artifacts/unlisted.png">',
+    '<source srcset="../artifacts/hero.png 1x, ../artifacts/unlisted.png 2x">',
+    '<a href="../design.md">Unlisted document</a>',
+    '<meta http-equiv="refresh" content="0; url=/api">',
+  ]) assert.throws(() => validateVersionShowcaseResources(html, generated), /outside|unavailable/);
+});

@@ -226,7 +226,7 @@ async function cachedEntries(directory: string): Promise<Dirent[]> {
 async function walk(directory: string): Promise<string[]> {
   const found: string[] = [];
   for (const child of await cachedEntries(directory)) {
-    if (child.name === "history" && basename(dirname(directory)) === "runs") continue;
+    if (["history", "solution-versions", "solution-tasks"].includes(child.name) && basename(dirname(directory)) === "runs") continue;
     const path = join(directory, child.name);
     if (child.isDirectory()) found.push(...await walk(path));
     else found.push(path);

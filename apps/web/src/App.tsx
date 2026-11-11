@@ -1,10 +1,12 @@
 import { PROJECT_CATEGORIES, projectClassification } from '@dreamatic/project-data/project-classification';
 import { usePublication } from "./publication-state";
 import { useI18n, LanguageToggle } from "./i18n";
-import { Upload, Grid2X2, PanelLeftClose, PanelLeftOpen, PanelLeft, RefreshCw } from "lucide-react";
+import { Upload, Grid2X2, PanelLeftClose, PanelLeftOpen, PanelLeft, RefreshCw, Layers3, Images } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { abortSession, createSession, deleteRun, getHealth, getRuntimeConfig, openProjectAssets, getWorkflow, getRun, listRunAssets, listAssets, listRuns, listSessions, renameRun, saveRuntimeConfig, streamPrompt, streamWorkflow, type HealthView, type PromptEvent, type RuntimeConfig } from "./api";
 import { AgentPanel, type PendingImage } from "./components/AgentPanel";
+import { listSolutionVersions, type SolutionVersion } from './api';
+import { SolutionVersions } from './components/SolutionVersions';
 import { Canvas } from "./components/Canvas";
 import { Showcase } from "./components/Showcase";
 import { ProjectOverview } from "./components/ProjectOverview";
@@ -112,7 +114,26 @@ export function App() {
   const agentRunning = Boolean(activeId && runningSessions.has(activeId)) || Boolean(active?.running);
   const projectFiles = useProjectFiles(activeRunId, agentRunning);
   const [canvasAdd, setCanvasAdd] = useState<{ runId: string; fileId: string; nonce: string }>();
-  useEffect(() => setCanvasAdd(undefined), [activeRunId]);
+  const [solutionAdd, setSolutionAdd] = useState<{ runId: string; versionId: string; nonce: string }>();
+  const [editorLibrary, setEditorLibrary] = useState<'versions' | 'assets'>('versions');
+  const [versionState, setVersionState] = useState<{ runId?: string; versions: SolutionVersion[]; loading?: boolean; error?: boolean }>({ versions: [] });
+  const versionRequest = useRef(0);
+  const refreshVersions = useCallback(() => {
+    if (!activeRunId) return;
+    const request = ++versionRequest.current;
+    setVersionState(current => current.runId === activeRunId ? current : { runId: activeRunId, versions: [], loading: true });
+    void listSolutionVersions(activeRunId).then(versions => {
+      if (request === versionRequest.current) setVersionState({ runId: activeRunId, versions });
+    }).catch(() => {
+      if (request === versionRequest.current) setVersionState(current => ({ ...current, loading: false, error: true }));
+    });
+  }, [activeRunId]);
+  useEffect(() => {
+    if (view === 'canvas') refreshVersions();
+    return () => { versionRequest.current++; };
+  }, [view, refreshVersions, activeRun?.status]);
+  const versions = versionState.runId === activeRunId ? versionState.versions : [];
+  useEffect(() => { setCanvasAdd(undefined); setSolutionAdd(undefined); setEditorLibrary('versions'); }, [activeRunId]);
   const sectionFiles = projectFiles.files.filter(file => file.category === (view === 'canvas' ? 'assets' : view) && (view !== 'canvas' || mediaKind(file)));
   const selectedFileId = fileSelection.runId === activeRunId ? fileSelection.items[view] : undefined;
   const documentFile = sectionFiles.find(file => file.id === selectedFileId) ?? sectionFiles[0];
@@ -522,15 +543,25 @@ export function App() {
         </header>
         <div className="workspace-content">
           {view === "overview" && <ProjectOverview run={activeRun} workflow={workflow} assets={visibleAssets} files={projectFiles.files} running={agentRunning} pending={pendingAgentStatus} onNavigate={navigate} />}
-          <div className="canvas-container" hidden={view !== "canvas"}><Canvas onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={projectFiles.files} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
+          <div className="canvas-container" hidden={view !== "canvas"}><Canvas versions={versions} solutionAdd={solutionAdd?.runId === activeRunId ? solutionAdd : undefined} onVersionsChanged={refreshVersions} onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={projectFiles.files} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
           {view === "preview" && <Showcase key={activeRunId ?? "empty"} run={activeRun} entry={previewEntry} />}
           {!conversationView && view !== "canvas" && <DocumentViewer runId={activeRunId} file={documentFile} />}
         </div>
 
       </section>
-      <aside className="workbench-tools" id="workbench-tools" hidden={!toolVisible} aria-label={t("Workbench tools")}>
+      <aside className={`workbench-tools${view === 'canvas' ? ' solution-library-open' : ''}`} id="workbench-tools" hidden={!toolVisible} aria-label={t("Workbench tools")}>
       <div className="conversation-container" hidden={!conversationView}><AgentPanel canResume={["interrupted", "waiting_for_images"].includes(activeRun?.status ?? "")} connected={Boolean(health?.ok && !connectionError)} disabled={!activeRun || !activeId || loading || creating} timeline={activeRun?.activity ?? timeline} workflow={activeRun ? workflow : []} streamingText={streamingText} running={agentRunning} stopping={stopping} pendingAgentStatus={pendingAgentStatus} clarification={visibleClarification} onSend={send} onStop={() => void stopAgent()} onAnswerClarification={answerClarification} onDismissClarification={() => { if (visibleClarification) setAnsweredClarificationId(visibleClarification.id); setLiveClarification(undefined); }} /></div>
-      {!conversationView && <WorkspaceFileList key={`${activeRunId}:${view}`} runId={activeRunId} files={sectionFiles} selected={documentFile?.id} title={view === 'context' ? 'Context' : (view === 'assets' || view === 'canvas') ? 'Asset library' : 'References'} loading={projectFiles.loading} error={projectFiles.error} canvasMode={view === 'canvas'} onAddResult={file => { if (activeRunId) { setCanvasAdd({ runId: activeRunId, fileId: file.id, nonce: crypto.randomUUID() }); if (toolPanel.viewportWidth <= 900) setPanelOpen(false); } }} onSelect={file => { if (view === 'canvas') setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); else navigate(view, file); }} onRetry={projectFiles.refresh} />}
+      {view === 'canvas' && <div className="solution-library-switch" role="group" aria-label={t('Editor library')}>
+        <button aria-pressed={editorLibrary === 'versions'} onClick={() => setEditorLibrary('versions')}><Layers3 size={16} aria-hidden="true" />{t('Versions')}</button>
+        <button aria-pressed={editorLibrary === 'assets'} onClick={() => setEditorLibrary('assets')}><Images size={16} aria-hidden="true" />{t('Assets')}</button>
+      </div>}
+      {view === 'canvas' && editorLibrary === 'versions' && <SolutionVersions versions={versions}
+        loading={Boolean(activeRunId && (versionState.runId !== activeRunId || versionState.loading))} error={Boolean(versionState.runId === activeRunId && versionState.error)}
+        onRetry={refreshVersions} onAdd={version => {
+          setSolutionAdd({ runId: version.runId, versionId: version.id, nonce: crypto.randomUUID() });
+          if (toolPanel.viewportWidth <= 900) setPanelOpen(false);
+        }} />}
+      {!conversationView && (view !== 'canvas' || editorLibrary === 'assets') && <WorkspaceFileList key={`${activeRunId}:${view}`} runId={activeRunId} files={sectionFiles} selected={documentFile?.id} title={view === 'context' ? 'Context' : (view === 'assets' || view === 'canvas') ? 'Asset library' : 'References'} loading={projectFiles.loading} error={projectFiles.error} canvasMode={view === 'canvas'} onAddResult={file => { if (activeRunId) { setCanvasAdd({ runId: activeRunId, fileId: file.id, nonce: crypto.randomUUID() }); if (toolPanel.viewportWidth <= 900) setPanelOpen(false); } }} onSelect={file => { if (view === 'canvas') setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); else navigate(view, file); }} onRetry={projectFiles.refresh} />}
       <div className="tool-panel-resizer" role="separator" tabIndex={0} aria-label={t("Resize tool panel")} aria-orientation="vertical" aria-controls="workbench-tools" aria-valuemin={toolPanel.minWidth} aria-valuemax={Math.round(toolPanel.maxWidth)} aria-valuenow={Math.round(toolPanel.width)} onPointerDown={toolPanel.onPointerDown} onPointerMove={toolPanel.onPointerMove} onPointerUp={toolPanel.stop} onPointerCancel={toolPanel.stop} onLostPointerCapture={toolPanel.stop} onDoubleClick={toolPanel.reset} onKeyDown={event => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();

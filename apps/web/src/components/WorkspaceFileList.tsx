@@ -31,7 +31,7 @@ export function WorkspaceFileList({ runId, files, selected, title, loading, erro
     } catch (error) { if (mounted.current) setUploadMessage(error instanceof Error ? error.message : 'Media upload failed. Please try again.'); }
     finally { uploadLock.current = false; if (mounted.current) { setUploading(false); onRetry(); } }
   }
-  return <section className="workspace-files"><header className="agent-header"><strong>{t(title)}</strong><button className="file-refresh" onClick={onRetry} aria-label={t('Refresh files')}><RefreshCw size={14} /></button></header>
+  return <section className={`workspace-files${canvasMode ? ' editor-asset-list' : ''}`}><header className={canvasMode ? 'agent-header library-heading' : 'agent-header'}><strong>{t(title)}{canvasMode && <span>{shownFiles.length}</span>}</strong><button className={canvasMode ? "file-refresh library-icon-button" : "file-refresh"} onClick={onRetry} aria-label={t('Refresh files')}><RefreshCw size={14} /></button></header>
     {canvasMode && <div className="canvas-upload-area">
       <input ref={input} type="file" hidden multiple accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.mp4,.webm,.mov" aria-label={t('Upload media files')} onChange={event => void upload(event.target.files)} />
       <button type="button" className={`canvas-upload-zone${dragOverUpload ? ' drag-over' : ''}`} aria-label={t('Upload media')} aria-disabled={!runId || uploading} aria-busy={uploading} onClick={() => { if (runId && !uploadLock.current) input.current?.click(); }}
@@ -48,14 +48,14 @@ export function WorkspaceFileList({ runId, files, selected, title, loading, erro
           void upload(event.dataTransfer.files);
         }}>
         {uploading ? <RefreshCw size={22} className="spin" /> : <Upload size={22} strokeWidth={1.6} />}
-        <strong>{t(uploading ? 'Uploading…' : dragOverUpload ? 'Drop files to upload' : 'Drag images or videos here')}</strong>
-        <span>{t('or click to choose files')}</span><small>{t('Images and videos · Up to 100 MB per file')}</small>
+        <span className="editor-upload-copy"><strong>{t(uploading ? 'Uploading…' : dragOverUpload ? 'Drop files to upload' : 'Upload media')}</strong>
+          <small>{t('Drop images or videos here, up to 100 MB each.')}</small>
+        </span>
       </button>
       {uploadMessage && <p className="canvas-upload-feedback" role="alert">{t(uploadMessage)}</p>}
       {uploading && <span className="canvas-upload-feedback" role="status">{t('Uploading…')}</span>}
     </div>}
     <div className="workspace-file-scroll">
-    {canvasMode && <p className="canvas-media-hint">{t("Drag images and videos onto the canvas.")}</p>}
     {loading && <p role="status">{t('Loading files…')}</p>}
     {error && <p role="alert">{t('Could not load project files')}<small>{error}</small><button onClick={onRetry}>{t('Retry')}</button></p>}
     {!loading && !error && !shownFiles.length && <p>{t('No files in this section yet')}</p>}
@@ -65,7 +65,7 @@ export function WorkspaceFileList({ runId, files, selected, title, loading, erro
         if (!draggable || !runId) { event.preventDefault(); return; }
         event.dataTransfer.setData(CANVAS_MEDIA_MIME, JSON.stringify({ runId, fileId: file.id }));
         event.dataTransfer.effectAllowed = 'copy';
-      }} aria-pressed={selected === file.id} onClick={() => onSelect(file)}><FileListPreview file={file} runId={runId} /><span className="workspace-file-label"><strong>{file.title}</strong><small>{file.path ?? file.url ?? file.kind.toUpperCase()}</small></span>{file.url && <ExternalLink size={12} />}</button>{draggable && runId && <MediaRename runId={runId} file={file} onRenamed={onRenamed ?? onRetry} onAddResult={onAddResult} />}</div>;
+      }} aria-pressed={selected === file.id} onClick={() => onSelect(file)}><FileListPreview file={file} runId={runId} /><span className="workspace-file-label"><strong>{file.title}</strong><small title={canvasMode ? file.path : undefined}>{canvasMode ? file.kind.toUpperCase() : file.path ?? file.url ?? file.kind.toUpperCase()}</small></span>{file.url && <ExternalLink size={12} />}</button>{draggable && runId && <MediaRename runId={runId} file={file} onRenamed={onRenamed ?? onRetry} onAddResult={onAddResult} />}</div>;
     })}</section>)}
   </div></section>;
 }

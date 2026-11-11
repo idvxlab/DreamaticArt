@@ -38,6 +38,21 @@ test('six workbench views preserve conversation, canvas and project isolation an
     { id: 'custom-note', kind: 'text', text: 'My creative note', x: 75, y: 95, width: 240, height: 180 },
     { id: 'asset-runs/A/artifacts/design.png', kind: 'image', assetPath: assets[0].path, x: 500, y: 120, width: 350, height: 280 },
   ] };
+  function version(id, title, parentIds = []) {
+    return { id: id.repeat(64), runId: 'A', title, parentIds, createdAt: '2026-01-01T00:00:00Z',
+      coverPath: 'artifacts/design.png', designPath: 'design.md', showcasePath: 'final/00-index.html', exhibitionPath: 'showcase.md',
+      images: [{ id: 'design', path: 'artifacts/design.png' }] };
+  }
+  const initialVersions = [version('a', 'First study'), version('b', 'Second study')];
+  const versions = [...initialVersions];
+  function attempt(number, status, actor = 'builder') {
+    return {
+      number, status, submittedAt: '2026-01-01T00:00:00Z', startedAt: '2026-01-01T00:00:01Z', endedAt: '2026-01-01T00:00:04Z',
+      reportedCalls: status === 'succeeded' ? 1 : 0, reportedTokens: status === 'succeeded' ? 42 : 0, unreportedCalls: 1,
+      events: [{ at: '2026-01-01T00:00:02Z', actor, label: 'plan_showcase', state: status === 'succeeded' ? 'completed' : 'failed' }],
+    };
+  }
+  const solutionTasks = [];
   let persisted;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://fixture');
@@ -71,6 +86,39 @@ test('six workbench views preserve conversation, canvas and project isolation an
     }
     if (url.pathname.endsWith('/references/read')) { json({ title: 'Reference article', url: 'https://example.org/source', embeddingBlocked: false, nodes: [{ tag: 'p', children: [{ tag: 'text', text: 'Readable reference content' }] }] }); return; }
     if (url.pathname.endsWith('/publish')) { json({ published: false, mayExist: false, inProgress: false }); return; }
+    if (url.pathname.endsWith('/versions')) { json(url.pathname.includes('/A/') ? versions : []); return; }
+    if (url.pathname.includes('/versions/') && url.pathname.endsWith('.png')) {
+      res.setHeader('Content-Type', 'image/png');
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'));
+      return;
+    }
+    const solutionAction = /\/solution-tasks\/([^/]+)\/(cancel|retry)$/.exec(url.pathname);
+    if (solutionAction) {
+      const task = solutionTasks.find(entry => entry.id === solutionAction[1]);
+      if (solutionAction[2] === 'cancel') task.status = 'cancelled';
+      else if (task.status === 'cancelled') {
+        task.status = 'failed';
+        task.error = 'Showcase delivery failed';
+      } else {
+        const outputs = [version('d', 'First branch', task.parentIds), version('e', 'Second branch', task.parentIds)];
+        versions.unshift(...outputs);
+        task.status = 'succeeded';
+        delete task.error;
+      }
+      if (solutionAction[2] === 'cancel' && task.activity.length) task.activity[task.activity.length - 1] = attempt(task.activity.length, task.status);
+      else task.activity.push(attempt(task.activity.length + 1, task.status));
+      json(task); return;
+    }
+    if (url.pathname.endsWith('/solution-tasks')) {
+      if (req.method === 'GET') { json(solutionTasks); return; }
+      let body = ''; for await (const part of req) body += part;
+      const input = JSON.parse(body);
+      const fusion = input.operation === 'fuse';
+      const outputIds = (fusion ? ['c'] : ['d', 'e']).map(id => id.repeat(64));
+      if (fusion) versions.unshift(version('c', 'Fusion', input.parentIds));
+      const task = { ...input, createdAt: new Date().toISOString(), status: fusion ? 'succeeded' : 'waiting', outputIds, activity: fusion ? [attempt(1, 'succeeded')] : [] };
+      solutionTasks.push(task); json(task); return;
+    }
     if (url.pathname.endsWith('/canvas')) {
       if (req.method === 'PUT') { let body = ''; for await (const part of req) body += part; persisted = JSON.parse(body); json(persisted); }
       else json(url.pathname.includes('/A/') ? (persisted?.runId === 'A' ? persisted : saved) : null);
@@ -171,7 +219,8 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.frameLocator('.showcase-view iframe').getByRole('heading', {name: 'Showcase work'}).waitFor();
   await nav('Workbench').click();
   await page.locator('.composer textarea').fill('Unsent idea');
-  await nav('Canvas').click(); await page.getByText('My creative note', { exact: true }).waitFor();
+  await nav('Solution editor').click(); await page.getByText('My creative note', { exact: true }).waitFor();
+  await page.getByRole('group', { name: 'Editor library' }).getByRole('button', { name: 'Assets', exact: true }).click();
   assert.equal(await page.locator('.workspace-files').isVisible(), true);
   assert.equal(await page.locator('.composer textarea').isVisible(), false);
   assert.equal(await page.locator('.document-viewer').count(), 0);
@@ -190,6 +239,7 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.getByText('Drop files to upload',{exact:true}).waitFor();
   await dropZone.evaluate(node=>{const files=new DataTransfer();files.items.add(new File(['fixture'],'dropped.png',{type:'image/png'}));node.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:files}));});
   await page.locator('.workspace-file-item').filter({hasText:'dropped.png'}).waitFor();
+  await page.locator('.workbench-tools').screenshot({ animations: 'disabled', path: '/tmp/dreamatic-editor-assets.png' });
   await dropZone.evaluate(node=>{const data=new DataTransfer();data.setData('application/x-dreamatic-project-media',JSON.stringify({runId:'A',fileId:'artifacts/design.png'}));node.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:data}));});
   assert.equal(await dropZone.evaluate(node=>node.classList.contains('drag-over')),false);
   await upload.setInputFiles({name:'not-media.html',mimeType:'text/html',buffer:Buffer.from('no')});
@@ -215,7 +265,7 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.waitForFunction(count => document.querySelectorAll('.canvas-artboard').length === count + 1, initialMediaCount);
   await nav('Workbench').click();
   assert.equal(await page.locator('.composer textarea').inputValue(), 'Unsent idea');
-  await nav('Canvas').click();
+  await nav('Solution editor').click();
   assert.equal(await page.locator('.canvas-artboard').count(), initialMediaCount + 1);
   await page.locator('.workspace-file-item').filter({ hasText: 'Design image' }).click();
   assert.equal(await page.locator('.document-viewer').count(), 0);
@@ -284,7 +334,7 @@ test('six workbench views preserve conversation, canvas and project isolation an
   assert.equal(await page.locator('.document-frame').count(), 0); assert.equal(await page.locator('.workbench-tools').isVisible(), true);
   await nav('Preview').click(); await page.getByRole('heading', { name: 'No works to preview yet' }).waitFor();
   await page.locator('.project-select').filter({ hasText: 'Project A' }).click();
-  await nav('Canvas').click();
+  await nav('Solution editor').click();
   await page.waitForFunction(count => document.querySelectorAll('.canvas-artboard').length === count + 2, initialMediaCount);
   await page.waitForTimeout(150);
   assert.equal(await page.locator('.canvas-artboard').count(), initialMediaCount + 2, 'old add requests cannot replay after revisiting the project');
@@ -297,5 +347,115 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.locator('.overview-images').getByRole('button',{name:'Showcase Page',exact:true}).waitFor();
   assert.equal(await page.locator('.overview-images img').count(),0);
   assert.equal(await page.getByRole('heading',{name:'Generated Works',exact:true}).count(),1);
+  await nav('Solution editor').click();
+  const library = page.getByRole('region', { name: 'Solution versions' });
+  await library.getByText('First study', { exact: true }).waitFor();
+  await library.locator('article').filter({ hasText: 'First study' }).getByRole('button', { name: 'Add solution to editor' }).click();
+  const cards = page.locator('.canvas-solution');
+  await cards.filter({ hasText: 'First study' }).waitFor();
+  await library.locator('article').filter({ hasText: 'Second study' }).dragTo(page.locator('.canvas-viewport'), { targetPosition: { x: 145, y: 690 } });
+  await cards.filter({ hasText: 'Second study' }).waitFor();
+  await cards.filter({ hasText: 'First study' }).click({ position: { x: 30, y: 25 } });
+  const newPrompt = page.getByRole('button', { name: 'Create prompt card' });
+  const fit = page.getByRole('button', { name: 'Fit project' });
+  await newPrompt.click();
+  await fit.click();
+  const fusionPrompt = page.locator('.canvas-solution-prompt').first();
+  assert.equal(await fusionPrompt.getByLabel('Operation').inputValue(), '');
+  const edge = page.locator('.canvas-connections [data-edge-id]').last();
+  await edge.press('Delete');
+  const promptCard = page.locator('.canvas-prompt').last();
+  const inputPort = promptCard.locator('[data-port-side="left"]');
+  async function connect(source) {
+    const from = await source.locator('[data-port-side="right"]').boundingBox();
+    const to = await inputPort.boundingBox();
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+    await page.mouse.up();
+  }
+  await connect(cards.filter({ hasText: 'First study' }));
+  await fusionPrompt.getByLabel('Input versions').getByText('First study').waitFor();
+  await connect(cards.filter({ hasText: 'First study' }));
+  await page.getByText('These cards are already connected.', { exact: true }).waitFor();
+  await connect(cards.filter({ hasText: 'Second study' }));
+  assert.equal(await page.getByText('These cards are already connected.', { exact: true }).count(), 0);
+  assert.match(await fusionPrompt.getByLabel('Operation').locator('option:checked').textContent(), /Fuse solutions/);
+  await fusionPrompt.getByLabel('Move source up').click();
+  await fusionPrompt.getByLabel('Source role 1', { exact: true }).fill('Primary layout');
+  await fusionPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).fill('Combine the two concepts');
+  const imageCard = page.locator('.canvas-media:not(.canvas-solution)').filter({ has: page.locator('[data-port-side="right"]') }).first();
+  await connect(imageCard);
+  await fusionPrompt.getByText('This edit has both images and solutions. Disconnect one input type to run it.').waitFor();
+  assert.equal(await fusionPrompt.getByRole('button', { name: 'Run solution edit' }).isDisabled(), true);
+  await page.locator('.canvas-connections [data-edge-id]').last().press('Delete');
+  await fusionPrompt.getByRole('button', { name: 'Run solution edit' }).click();
+  await cards.filter({ hasText: 'Fusion' }).waitFor({ state: 'attached' });
+  assert.deepEqual(solutionTasks[0].parentIds, initialVersions.map(entry => entry.id).reverse());
+  assert.equal(solutionTasks[0].sourceNotes[0], 'Primary layout');
+  assert.equal(await library.locator('article').filter({ hasText: 'Fusion' }).getByRole('link', { name: 'Exhibition direction' }).count(), 1);
+  await fit.click();
+  await cards.filter({ hasText: 'Fusion' }).click({ position: { x: 28, y: 24 } });
+  await newPrompt.click();
+  await fit.click();
+  const splitPrompt = page.locator('.canvas-solution-prompt').last();
+  await splitPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).fill('/split 2 Independent directions');
+  assert.match(await splitPrompt.getByLabel('Operation').locator('option:checked').textContent(), /Split solution/);
+  await splitPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).press('Enter');
+  await splitPrompt.getByText('Waiting for another solution edit').waitFor();
+  const liveTask = solutionTasks[1];
+  liveTask.status = 'running';
+  liveTask.phase = 'showcase';
+  liveTask.activity = [{
+    number: 1, submittedAt: liveTask.createdAt, startedAt: liveTask.createdAt,
+    reportedCalls: 0, reportedTokens: 0, unreportedCalls: 0,
+    events: [{ at: liveTask.createdAt, actor: 'builder', label: 'Agent execution', state: 'started' }],
+  }];
+  await splitPrompt.locator('.prompt-activity').getByText('Agent execution', { exact: false }).waitFor();
+  for (let retry = 0; retry < 50 && !persisted?.elements.some(item => item.taskId === liveTask.id); retry++) {
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.ok(persisted.elements.some(item => item.taskId === liveTask.id));
+  await page.reload();
+  await page.locator('.project-select').filter({ hasText: 'Project A' }).click();
+  await nav('Solution editor').click();
+  await splitPrompt.locator('.prompt-activity').getByText('Agent execution', { exact: false }).waitFor();
+  await fit.click();
+
+  await splitPrompt.getByRole('button', { name: 'Cancel' }).click();
+  await splitPrompt.getByRole('button', { name: 'Retry' }).click();
+  await splitPrompt.getByRole('alert').filter({ hasText: 'Showcase delivery failed' }).waitFor();
+  assert.equal(await cards.filter({ hasText: 'Second branch' }).count(), 0);
+  await splitPrompt.getByRole('button', { name: 'Retry' }).click();
+  await cards.filter({ hasText: 'Second branch' }).waitFor({ state: 'attached' });
+  assert.equal(solutionTasks[1].parentIds[0], 'c'.repeat(64));
+  assert.equal(solutionTasks[1].outputCount, 2);
+  assert.equal(solutionTasks[1].prompt, 'Independent directions');
+  assert.equal(solutionTasks[1].originalPrompt, '/split 2 Independent directions');
+  await page.waitForFunction(() => document.querySelectorAll('.canvas-solution').length === 5);
+  for (let attempt = 0; attempt < 50 && persisted?.elements.filter(item => item.kind === 'solution').length !== 5; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.equal(persisted.elements.filter(item => item.kind === 'solution').length, 5);
+  await page.reload();
+  await page.locator('.project-select').filter({ hasText: 'Project A' }).click();
+  await nav('Solution editor').click();
+  await cards.filter({ hasText: 'Second branch' }).waitFor({ state: 'attached' });
+  assert.equal(await cards.count(), 5);
+  const restoredConversation = page.locator('.canvas-solution-prompt').last();
+  assert.equal(await restoredConversation.locator('.prompt-user-message').textContent(), '/split 2 Independent directions');
+  assert.equal(await restoredConversation.locator('.prompt-attempt').count(), 3);
+  const executionSummary = restoredConversation.locator('.prompt-attempt').last().locator('.prompt-task-summary');
+  assert.match(await executionSummary.textContent(), /Queue time1 sec/);
+  assert.match(await executionSummary.textContent(), /Execution time3 sec/);
+  assert.match(await executionSummary.textContent(), /Reported tokens42/);
+  assert.match(await executionSummary.textContent(), /Some calls did not report token usage/);
+  assert.equal(await page.locator('.canvas-connections path').count(), persisted.edges.length);
+  await fit.click();
+  await page.screenshot({ animations: 'disabled', path: '/tmp/dreamatic-solution-editor.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const versionList = page.locator('.solution-list-scroll');
+  assert.equal(await versionList.evaluate(node => node.scrollWidth > node.clientWidth), false);
+  await page.locator('.workbench-tools').screenshot({ animations: 'disabled', path: '/tmp/dreamatic-editor-versions-mobile.png' });
   assert.deepEqual(errors, []);
 });

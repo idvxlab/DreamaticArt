@@ -54,3 +54,25 @@ test('corrupted canvas snapshots fail visibly instead of becoming empty saved bo
   await assert.rejects(readCanvasState(workspace,'demo'),SyntaxError);
   assert.equal(await readFile(join(workspace,'runs/demo/canvas/canvas-state.json'),'utf8'),'{broken');
 });
+
+test('legacy solution prompts normalize to unified prompts and preserve historical outputs', async () => {
+  const { canvasConnectionIssue } = await import('@dreamatic/project-data/canvas-graph');
+  const elements = [
+    { id: 'source', kind: 'solution', versionId: 'a'.repeat(64) },
+    { id: 'old', kind: 'solution-prompt', text: 'Split', taskId: 'original-task', operation: 'split' },
+    { id: 'child', kind: 'solution', versionId: 'b'.repeat(64) },
+    { id: 'image', kind: 'image', fileId: 'artifacts/image.png' }
+  ];
+  const edges = [
+    { id: 'first', source: 'source', target: 'old' },
+    { id: 'second', source: 'old', target: 'child' }
+  ];
+  const restored = normalizeCanvasState('demo', { elements, edges });
+  assert.deepEqual(restored.edges, edges);
+  assert.equal(restored.elements[1].kind, 'prompt');
+  assert.equal(restored.elements[1].taskId, 'original-task');
+  assert.equal(restored.elements[1].operation, 'split');
+  assert.equal(canvasConnectionIssue(restored.elements, edges, 'image', 'old'), undefined);
+  assert.equal(canvasConnectionIssue(restored.elements, edges, 'source', 'old'), 'duplicate');
+  assert.equal(canvasConnectionIssue(restored.elements, edges, 'child', 'old'), 'cycle');
+});

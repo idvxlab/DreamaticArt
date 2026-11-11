@@ -123,3 +123,15 @@ test('multiline duplicates are removed only when the complete entries match',asy
  const duplicate=reviewResearchCitations('# Research\n## References\n'+first+'\n'+first+'\n');
  assert.equal(duplicate.text.split(first).length-1,1);assert.equal(duplicate.issues.length,0);
 });
+
+test('fusion gives conflicting local reference numbers distinct canonical IDs and rejects unknown output citations', async () => {
+  const { bindFusionCitations, fusionCitationDirectory } = await import('../dist/design-citations.js');
+  const merged = fusionCitationDirectory([
+    'Input A [1]\n\n## References\n[1] First source. https://example.org/one',
+    'Input B [1, 2]\n\n## References\n[1] Second source. https://example.org/two\n[2] First source again. https://example.org/one'
+  ]);
+  assert.deepEqual(merged.mappings, [{ 1: 1 }, { 1: 2, 2: 1 }]);
+  assert.match(bindFusionCitations('Sources [1, 2]', merged.directory), /\[2\] Second source/);
+  assert.throws(() => bindFusionCitations('Missing [3]', merged.directory), /Missing IEEE reference/);
+  assert.throws(() => bindFusionCitations('Swapped [1]\n\n## References\n[1] Wrong source. https://example.org/two', merged.directory), /does not match its canonical source/);
+});

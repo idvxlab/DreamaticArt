@@ -1,3 +1,5 @@
+import { listSolutionTasks, projectSolutionTasksInProgress, solutionTaskAction, solutionTasksInProgress, stopSolutionTasks, submitSolutionTask } from './solution-tasks.js';
+import { listSolutionVersions, readSolutionFile } from './solution-versions.js';
 import { finalizeImageEdit } from './image-edit-output.js';
 import { preflightImageEdit } from './image-edit.js';
 import { submitEditorTask, listEditorTasks, cancelEditorTask, waitEditorTask, type EditorInput } from './editor.js';
@@ -232,7 +234,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       return;
     }
     if (request.method === "PUT" && url.pathname === "/api/config") {
-      if (registry.busy || publicationInProgress() || portfolioInProgress()) { json(response, 409, { error: "Wait for the current task, export or publication to finish before saving configuration." }); return; }
+      if (registry.busy || solutionTasksInProgress() || publicationInProgress() || portfolioInProgress()) { json(response, 409, { error: "Wait for the current task, export or publication to finish before saving configuration." }); return; }
       applyingConfiguration = true;
       let replacement: ReturnType<typeof createServer> | undefined;
       const envPath = join(configRoot, ".env");
@@ -393,7 +395,12 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       return;
     }
     if (request.method === "DELETE" && runMatch?.[1]) {
-      json(response, 200, await deleteRun(workspaceDir, decodeURIComponent(runMatch[1])));
+      const runId = decodeURIComponent(runMatch[1]);
+      if (await projectSolutionTasksInProgress(workspaceDir, runId)) {
+        json(response, 409, { error: 'Wait for the solution task to finish before deleting this project.' });
+        return;
+      }
+      json(response, 200, await deleteRun(workspaceDir, runId));
       return;
     }
     const runDetailMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
@@ -403,6 +410,41 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       const run = (await runInventory(workspaceDir, { runId }))[0];
       if (run) conditionalJson(request, response, run); else json(response, 404, { error: "Run not found" });
       return;
+    }
+    const versionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/versions(?:\/([^/]+)\/files\/(.+))?$/);
+    if (request.method === 'GET' && versionMatch?.[1]) {
+      const runId = decodeURIComponent(versionMatch[1]);
+      if (!versionMatch[2]) {
+        conditionalJson(request, response, await listSolutionVersions(workspaceDir, runId));
+      } else {
+        const file = await readSolutionFile(workspaceDir, runId, versionMatch[2], decodeURIComponent(versionMatch[3]!));
+        response.writeHead(200, {
+          'Content-Type': file.contentType,
+          'Content-Length': file.bytes.length,
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+          'Referrer-Policy': 'no-referrer',
+        });
+        response.end(file.bytes);
+      }
+      return;
+    }
+    const solutionTaskMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/solution-tasks(?:\/([^/]+)\/(cancel|retry))?$/);
+    if (solutionTaskMatch?.[1]) {
+      const runId = decodeURIComponent(solutionTaskMatch[1]);
+      if (request.method === 'GET' && !solutionTaskMatch[2]) {
+        json(response, 200, await listSolutionTasks(workspaceDir, runId));
+        return;
+      }
+      if (request.method === 'POST') {
+        if (solutionTaskMatch[2]) {
+          const action = solutionTaskMatch[3] === 'cancel' ? 'cancel' : 'retry';
+          json(response, 202, await solutionTaskAction(repoRoot, workspaceDir, runId, decodeURIComponent(solutionTaskMatch[2]), action));
+        } else {
+          json(response, 202, await submitSolutionTask(repoRoot, workspaceDir, runId, record(await body(request))));
+        }
+        return;
+      }
     }
     const uploadMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/media$/);
     if (request.method === "POST" && uploadMatch?.[1]) {
@@ -518,6 +560,10 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (request.method === "GET" && url.pathname.startsWith("/assets/")) {
       const assetPath = decodeURIComponent(url.pathname.slice("/assets/".length));
       const path = resolveAsset(assetPath);
+      if (/^runs[/\\][^/\\]+[/\\]solution-(?:tasks|versions)(?:[/\\]|$)/u.test(path.slice(workspaceDir.length + 1))) {
+        json(response, 404, { error: 'Asset not found' });
+        return;
+      }
       const page = assetPath.match(/^runs\/([^/]+)\/(?:final\/)?(artifacts\/.+\.html)$/u);
       if (page) {
         const preview = await previews.open(page[1]!, page[2]!).catch(() => undefined);
@@ -572,7 +618,7 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  await registry.dispose().catch(() => undefined);
+  await Promise.allSettled([registry.dispose(), stopSolutionTasks()]);
   await previews.close();
   server.close();
   server.closeAllConnections();

@@ -128,3 +128,12 @@ test('export adds consistent category metadata to snapshots without rewriting th
   assert.equal(await readFile(path,'utf8'),original);assert.equal(await readFile(join(f.run,'artifacts/artifact-manifest.json'),'utf8'),originalManifest);
  }finally{await zip.cleanup()}
 });
+
+test('gallery export preserves the exhibition direction document', async t => {
+  const f = await fixture(t, 'gallery');
+  const direction = '# Exhibition direction\n\nHero: work\n';
+  await writeFile(join(f.run, 'showcase.md'), direction);
+  const archive = await prepareProjectExport(f.workspace, f.runId);
+  t.after(() => archive.cleanup());
+  assert.equal((await exec('unzip', ['-p', archive.path, `${f.runId}/showcase.md`])).stdout, direction);
+});

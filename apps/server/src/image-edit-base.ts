@@ -1,3 +1,4 @@
+import { modelActivityUsage, type EditActivityReporter } from './edit-activity.js';
 import { Type } from 'typebox';
 import { createDreamaticAgent } from './agent-session.js';
 
@@ -80,7 +81,7 @@ export function selectBaseImage(prompt: string, inputs: BaseImageInput[]): BaseI
 }
 
 /** Reuse Editor/Pi for semantic cases which cannot be settled by exact references. */
-export async function resolveBaseImage(options: { root: string; prompt: string; inputs: BaseImageInput[]; signal: AbortSignal; env: NodeJS.ProcessEnv; allowReasoning?: boolean; images?: () => Array<{ data: string; mimeType: string }> }): Promise<BaseImageSelection> {
+export async function resolveBaseImage(options: { root: string; prompt: string; inputs: BaseImageInput[]; signal: AbortSignal; env: NodeJS.ProcessEnv; allowReasoning?: boolean; report?: EditActivityReporter; images?: () => Array<{ data: string; mimeType: string }> }): Promise<BaseImageSelection> {
   const selection = selectBaseImage(options.prompt, options.inputs);
   if (selection.baseImageMethod !== 'fallback' || selection.baseImageReason.startsWith('Conflicting') || options.allowReasoning === false) return selection;
   const visualBaseIntent = /(?:以|用).*(?:为|作为)(?:基底|底图|基础|背景)|(?:保留|沿用|保持).*(?:构图|场景|布局)|放进|放入|植入|移入|转到|\b(?:use|take).*\bas\b.*\b(?:base|canvas|background)\b|\b(?:put|place|insert|move).*\b(?:into|onto)\b/iu.test(options.prompt);
@@ -104,6 +105,14 @@ export async function resolveBaseImage(options: { root: string; prompt: string; 
         }
       }] });
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    options.report?.({ actor: 'editor', label: 'Choose base image', state: 'started' });
+    const unsubscribe = session.subscribe(event => {
+      if (event.type === 'message_end' && event.message.role === 'assistant') {
+        options.report?.({ actor: 'editor', label: 'Model response', state: event.message.stopReason === 'error' || event.message.stopReason === 'aborted' ? 'failed' : 'completed' }, modelActivityUsage(event.message.usage));
+      } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+        options.report?.({ actor: 'editor', label: event.toolName, state: event.type === 'tool_execution_start' ? 'started' : event.isError ? 'failed' : 'completed' });
+      }
+    });
     const abort = () => { void session.abort(); };
     deadline.addEventListener('abort', abort, { once: true });
     try {
@@ -113,7 +122,12 @@ export async function resolveBaseImage(options: { root: string; prompt: string; 
       const visibleImages = session.messages.filter(message => message.role === 'user').flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part.type === 'image') : []);
       if (selection.baseImageReason.startsWith('No identifiable') && visibleImages.length < options.inputs.length) return { ...selection, baseImageReason: 'Image inspection unavailable; defaulted to the first input.' };
       return picked ?? selection;
-    } finally { deadline.removeEventListener('abort', abort); session.dispose(); }
+    } finally {
+      unsubscribe();
+      options.report?.({ actor: 'editor', label: 'Choose base image', state: picked ? 'completed' : 'failed' });
+      deadline.removeEventListener('abort', abort);
+      session.dispose();
+    }
   } catch {
     signal.throwIfAborted();
     return { ...selection, baseImageReason: 'Base inference unavailable or inconclusive; defaulted to the first input.' };

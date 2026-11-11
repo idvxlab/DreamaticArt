@@ -1,3 +1,4 @@
+import { imageActivityUsage, type EditActivityReporter } from './edit-activity.js';
 import { editCapabilities, planImageEdit, dimensionStatus, type EditSizeOptions } from './image-edit-plan.js';
 import { resolveBaseImage, type BaseImageSelection } from './image-edit-base.js';
 import { imageDimensions, imageEditSizePolicy } from './image-edit-size.js';
@@ -33,7 +34,7 @@ export interface ImageEditDecision extends BaseImageSelection {
 }
 const activeEdits = new Set<string>();
 /** A user-requested image edit is separate from approved design outputs. Never rewrite source images or manifests. */
-export async function editProjectImage(workspace: string, runId: string, fileId: unknown, prompt: unknown, signal: AbortSignal, env: NodeJS.ProcessEnv = process.env, provenance?: { taskId: string; attempt: number; originalPrompt?: string; inputOrdinals?: number[]; sizeOptions?: EditSizeOptions }, onSize?: (size: string, decision: ImageEditDecision) => Promise<void>) {
+export async function editProjectImage(workspace: string, runId: string, fileId: unknown, prompt: unknown, signal: AbortSignal, env: NodeJS.ProcessEnv = process.env, provenance?: { taskId: string; attempt: number; originalPrompt?: string; inputOrdinals?: number[]; sizeOptions?: EditSizeOptions }, onSize?: (size: string, decision: ImageEditDecision) => Promise<void>, report?: EditActivityReporter) {
   const sourceIds = Array.isArray(fileId) ? fileId : [fileId];
   if (!sourceIds.length || sourceIds.length > 16 || sourceIds.some(id => typeof id !== 'string') || new Set(sourceIds).size !== sourceIds.length || typeof prompt !== 'string' || !prompt.trim() || prompt.trim().length > 8000) throw new Error('Enter an image edit prompt between 1 and 8000 characters.');
   env = { ...env };
@@ -66,7 +67,7 @@ export async function editProjectImage(workspace: string, runId: string, fileId:
     const recordFolder = await projectInputDirectory(workspace, runId, 'media-edits');
     const originalPrompt = provenance?.originalPrompt ?? prompt;
     const requestedSize = imageEditSizePolicy(originalPrompt, sourceDimensions[0]!, config.size);
-    const base = await resolveBaseImage({ root: join(workspace, 'runs', runId), prompt: originalPrompt, inputs: files.map((file, index) => ({ id: file.id, title: file.title, ordinal: provenance?.inputOrdinals?.[index] ?? index + 1 })), signal, env, allowReasoning: requestedSize.mode === 'preserve', images: () => images.map(image => ({ data: image.bytes.toString('base64'), mimeType: image.mimeType })) });
+    const base = await resolveBaseImage({ root: join(workspace, 'runs', runId), prompt: originalPrompt, inputs: files.map((file, index) => ({ id: file.id, title: file.title, ordinal: provenance?.inputOrdinals?.[index] ?? index + 1 })), signal, env, allowReasoning: requestedSize.mode === 'preserve', ...(report ? { report } : {}), images: () => images.map(image => ({ data: image.bytes.toString('base64'), mimeType: image.mimeType })) });
     const sizePolicy = imageEditSizePolicy(originalPrompt, sourceDimensions[base.baseImageIndex]!, config.size);
     const plan = planImageEdit(sourceDimensions[base.baseImageIndex]!, originalPrompt, config.size, config.capabilities, provenance?.sizeOptions);
     if (plan.conflict && !provenance?.sizeOptions?.confirmConflict) throw new Error('The prompt conflicts with the selected target size. Confirm the target size before generating.');
@@ -79,6 +80,7 @@ export async function editProjectImage(workspace: string, runId: string, fileId:
 Output geometry: generate at ${plan.requestSize}, preserving the base composition and the intended target aspect ratio ${plan.targetDimensions.width}:${plan.targetDimensions.height}. These explicit output geometry instructions override any conflicting size mentioned earlier. Final delivery target: ${plan.targetDimensions.width}x${plan.targetDimensions.height}; do not distort the subject.`;
     const release = await imageSlot(signal);
     let result;
+    report?.({ actor: 'image', label: 'Edit image', state: 'started' });
     try {
       result = await requestImage({
         url: setting(env, 'DREAMATIC_IMAGE_EDIT_ENDPOINT') || `${setting(env, 'DREAMATIC_IMAGE_BASE_URL').replace(/\/$/u, '')}/images/edits`,
@@ -90,6 +92,10 @@ Output geometry: generate at ${plan.requestSize}, preserving the base compositio
         bodyIdleTimeoutMs: Number(setting(env, 'DREAMATIC_IMAGE_BODY_IDLE_TIMEOUT_MS')),
         maxResponseBytes: Number(setting(env, 'DREAMATIC_IMAGE_RESPONSE_MAX_BYTES')), signal,
       });
+      report?.({ actor: 'image', label: 'Edit image', state: 'completed' }, imageActivityUsage(result.usage));
+    } catch (error) {
+      report?.({ actor: 'image', label: 'Edit image', state: 'failed' }, {});
+      throw error;
     } finally { release(); }
     signal.throwIfAborted();
     const kind = imageBytesKind(result.bytes);

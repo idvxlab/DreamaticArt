@@ -118,15 +118,25 @@ test('canvas edits a multi-input graph, groups history, cascades outputs and nev
   await handle.dragTo(prompt.locator('.port-left')); assert.equal(await edgeCount(), 3);
   await prompt.getByRole('button', { name: 'Generate edit', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.canvas-prompt footer [role="status"]')?.getAttribute('data-task-status') === 'running');
-  assert.equal(await prompt.locator('textarea').isDisabled(),true);assert.equal(await prompt.locator('textarea').inputValue(),'Fuse both sources');assert.equal(await prompt.locator('[role="status"] svg.spin').count(),1);assert.equal(await prompt.locator('[role="status"]').textContent(),'');
+  assert.equal(await prompt.locator('textarea').isDisabled(),true);assert.equal(await prompt.locator('textarea').inputValue(),'');assert.equal(await prompt.locator('.prompt-user-message').textContent(),'Fuse both sources');assert.equal(await prompt.locator('[role="status"] svg.spin').count(),1);assert.equal(await prompt.locator('[role="status"]').textContent(),'running');
   assert.equal(submissions.length, 1); assert.deepEqual(new Set(submissions[0].inputIds), new Set(files.map(file => file.id))); assert.equal(submissions[0].upstream.length, 3);
   const firstTask = tasks.get(submissions[0].id);
   const output = { id: 'inputs/user-assets/fused.png', title: 'Fused image', kind: 'png', path: 'inputs/user-assets/fused.png', category: 'assets', group: 'Uploaded files' };
-  tasks.set(firstTask.id, { ...firstTask, status: 'succeeded', output, size: '640x360', sizeSource: 'base-image', baseImageId: files[1].id });
+  tasks.set(firstTask.id, { ...firstTask, status: 'succeeded', output, size: '640x360', sizeSource: 'base-image', baseImageId: files[1].id,
+    activity: [{ number: 1, status: 'succeeded', submittedAt: '2026-01-01T00:00:00Z', startedAt: '2026-01-01T00:00:01Z', endedAt: '2026-01-01T00:00:04Z',
+      reportedCalls: 1, reportedTokens: 42, unreportedCalls: 0,
+      events: [
+        { at: '2026-01-01T00:00:01Z', actor: 'image', label: 'Edit image', state: 'started' },
+        { at: '2026-01-01T00:00:04Z', actor: 'image', label: 'Edit image', state: 'completed' },
+      ],
+    }],
+  });
   const outputCard = card(`editor-output-${firstTask.id}`); await outputCard.waitFor(); assert.equal(await edgeCount(), 4);
   assert.equal(await prompt.locator('textarea').isEnabled(),true);assert.equal(await prompt.locator('[role="status"] svg.spin').count(),0);
-  assert.match(await prompt.locator('footer').textContent(), /Output size: 640x360/);
-  assert.match(await prompt.locator('footer').textContent(), /Base image: b/);
+  assert.match(await prompt.locator('.prompt-task-results').textContent(), /Output size: 640x360/);
+  assert.match(await prompt.locator('.prompt-task-results').textContent(), /Base image: b/);
+  assert.equal(await prompt.locator('.prompt-action-list li').count(), 1);
+  assert.match(await prompt.locator('.prompt-action-list li').textContent(), /Edit image.*completed/);
   const outputSelector = `[data-element-id="editor-output-${firstTask.id}"]`;
   await page.waitForFunction(selector => { const node = document.querySelector(selector); return node && parseFloat(node.style.height) !== 280; }, outputSelector);
   const outputHeight = await outputCard.evaluate(node => parseFloat(node.style.height));
@@ -182,6 +192,31 @@ test('canvas edits a multi-input graph, groups history, cascades outputs and nev
   saved={...saved,elements:saved.elements.map(node=>node.id===promptId?{...node,width:80,height:40}:node)};
   await page.reload();await card(promptId).waitFor();
   assert.ok(await card(promptId).evaluate(node=>parseFloat(node.style.width)>=300&&parseFloat(node.style.height)>=240));
+  const layout = () => promptCard.evaluate(node => {
+    const inputs = node.querySelector('.prompt-dialog-inputs').getBoundingClientRect();
+    const messages = node.querySelector('.prompt-dialog-content').getBoundingClientRect();
+    const composer = node.querySelector('.prompt-composer').getBoundingClientRect();
+    const card = node.getBoundingClientRect();
+    return { width: parseFloat(node.style.width), height: parseFloat(node.style.height),
+      inputsX: inputs.x, inputsY: inputs.y, messagesX: messages.x, messagesY: messages.y,
+      messagesHeight: messages.height, composerBottom: composer.bottom, cardBottom: card.bottom };
+  });
+  const compact = await layout();
+  assert.ok(compact.inputsY < compact.messagesY, 'compact card places inputs above the transcript');
+  const zoom = await page.locator('.canvas-world').evaluate(node => new DOMMatrixReadOnly(getComputedStyle(node).transform).a);
+  await resizePromptBy(390 * zoom, 0);
+  const wide = await layout();
+  assert.ok(wide.width >= 680 && Math.abs(wide.height - compact.height) < 2, 'width can grow independently');
+  assert.ok(wide.inputsX > wide.messagesX && Math.abs(wide.inputsY - wide.messagesY) < 2, 'wide card moves inputs beside the transcript');
+  await resizePromptBy(0, 205 * zoom);
+  const tall = await layout();
+  assert.ok(Math.abs(tall.width - wide.width) < 2 && tall.messagesHeight > wide.messagesHeight + 100 * zoom, 'extra height grows the transcript');
+  assert.ok(tall.cardBottom - tall.composerBottom < 16 * zoom, 'composer stays docked at the bottom');
+  assert.equal(await promptCard.evaluate(node => {
+    const rect = node.querySelector('.prompt-dialog-inputs').getBoundingClientRect();
+    return node.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + 18));
+  }), true, 'an overlapping result card cannot cover the selected prompt controls');
+  await promptCard.screenshot({ path: '/tmp/dreamatic-prompt-dialogue-wide.png', animations: 'disabled' });
   // Related toolbar buttons stay together inside a narrow viewport.
   await page.setViewportSize({ width: 520, height: 850 });
   await page.waitForTimeout(150);

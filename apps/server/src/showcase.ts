@@ -219,7 +219,7 @@ function visibleImageSources(html: string): string[] {
 }
 
 /** Objective delivery checks only; aesthetic judgments belong to the Builder and the reviewer. */
-export async function validateShowcaseHtml(root: string, html: string, direction: ShowcaseDirection, generated: Record<string, GeneratedShowcaseImage>): Promise<void> {
+export async function validateShowcaseHtml(root: string, html: string, direction: { works: Array<Pick<ShowcaseWork, 'id'>> }, generated: Record<string, GeneratedShowcaseImage>): Promise<string[]> {
   const sources = visibleImageSources(html);
   const paths = new Map(Object.entries(generated).map(([id, image]) => [`../${image.path}`, id]));
   const shown = new Set<string>();
@@ -232,8 +232,51 @@ export async function validateShowcaseHtml(root: string, html: string, direction
   }
   for (const { id } of direction.works) if (!shown.has(id)) throw new Error(`Planned work is missing from the visible exhibition: ${id}`);
   if (/<script\b|<link\b[^>]*\bhref\s*=\s*["']https?:|@import\s|url\(\s*["']?https?:/i.test(html)) throw new Error('Exhibition must work as a static page with local images, inline CSS and system/local fonts');
+  return [...shown];
 }
 
 export function showcaseDirectionMarkdown(direction: ShowcaseDirection): string {
   return `# Exhibition direction\n\nHero: ${direction.heroId}\n\nAll works in narrative order:\n${direction.works.map(work => `- ${work.id} — ${work.role}; ${work.section}; ${work.purpose}`).join('\n')}\n\n${direction.markdown}\n`;
+}
+
+/** Check static version resources even when the page uses them outside visible img elements. */
+export function validateVersionShowcaseResources(html: string, generated: Record<string, GeneratedShowcaseImage>) {
+  const allowed = new Set(Object.values(generated).map(image => `../${image.path}`));
+  const check = (value: string) => {
+    if (!allowed.has(value.trim())) throw new Error(`Showcase resource is outside the version image list: ${value}`);
+  };
+  const css = (value: string) => {
+    const normalized = value.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\\(?:([0-9a-f]{1,6})\s?|([^\r\n]))/gi, (_match, hex: string | undefined, character: string) => {
+      if (!hex) return character;
+      const point = Number.parseInt(hex, 16);
+      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : '\uFFFD';
+    });
+    if (/@import\b|(?:image-set|image|src)\s*\(/i.test(normalized)) throw new Error('Use url() with a version image for CSS resources');
+    for (const reference of normalized.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\)/gi)) {
+      const target = (reference[1] ?? reference[2] ?? reference[3] ?? '').trim();
+      if (!/^#[\w:.-]+$/u.test(target)) check(target);
+    }
+  };
+  const page = html.replace(/<!--[\s\S]*?-->/g, '');
+  for (const style of page.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) css(style[1]!);
+  const markup = page.replace(/<(style|textarea|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  for (const tag of markup.matchAll(/<([a-z][\w:-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
+    const name = tag[1]!.toLowerCase();
+    if (['base', 'script', 'link', 'iframe', 'object', 'embed', 'form', 'video', 'audio', 'foreignobject', 'animate', 'animatetransform', 'set'].includes(name)) throw new Error(`Unsupported resource element in a static showcase: ${name}`);
+    for (const match of tag[0].slice(name.length + 1, -1).matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+      const attribute = match[1]!.toLowerCase();
+      const value = (match[2] ?? match[3] ?? match[4] ?? '').trim();
+      if (['style', 'fill', 'stroke', 'filter', 'mask', 'clip-path', 'marker-start', 'marker-mid', 'marker-end', 'cursor'].includes(attribute)) {
+        if (/&(?:#|[a-z][\w]*;)/i.test(value)) throw new Error('Use literal CSS in showcase style attributes');
+        css(value);
+      } else if (attribute === 'srcset') {
+        for (const candidate of value.split(',')) check(candidate.trim().split(/\s+/)[0] ?? '');
+      } else if (['src', 'poster', 'background', 'data', 'xlink:href', 'href'].includes(attribute) && value) {
+        if (attribute.endsWith('href') && (value.startsWith('#') || ((name === 'a' || name === 'area') && /^https?:\/\//i.test(value)))) continue;
+        check(value);
+      } else if (attribute === 'ping' || attribute === 'manifest' || (attribute === 'http-equiv' && name === 'meta')) {
+        throw new Error(`Attribute ${attribute} is unavailable in a static showcase`);
+      }
+    }
+  }
 }

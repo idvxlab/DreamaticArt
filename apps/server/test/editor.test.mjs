@@ -25,7 +25,7 @@ async function fixture(t) {
     if (mode === 'hang') await new Promise(resolve => { release = resolve; });
     if (mode === 'error') { res.writeHead(503); res.end('secret-provider-body'); return; }
     if (mode === 'invalid') { res.end(JSON.stringify({ data: [{ b64_json: Buffer.from('bad output').toString('base64') }] })); return; }
-    res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+    res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }], usage: { total_tokens: 42 } }));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { release?.(); server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
@@ -42,6 +42,10 @@ test('Editor deduplicates concurrent requests, persists all fusion inputs, and t
   const result = await waitEditorTask(f.workspace, 'demo', request.id);
   assert.equal(result.status, 'succeeded'); assert.equal(inputCount, 2); assert.equal(f.calls(), 1);
   assert.deepEqual(result.inputIds, request.inputIds);
+  assert.deepEqual(result.activity[0].events.map(event => [event.label, event.state]), [['Edit image', 'started'], ['Edit image', 'completed']]);
+  assert.equal(result.activity[0].reportedTokens, 42);
+  assert.equal(result.activity[0].unreportedCalls, 0);
+  assert.ok(Date.parse(result.activity[0].endedAt) >= Date.parse(result.activity[0].startedAt));
   assert.equal(result.baseImageId, request.inputIds[0]); assert.equal(result.baseImageMethod, 'fallback'); assert.equal(result.sizeSource, 'first-input');
   assert.deepEqual(result.outputDimensions, {width:1,height:1});
   assert.deepEqual((await projectFileContent(f.workspace, 'demo', result.output.id)).data, png);
@@ -71,6 +75,7 @@ test('Editor records failure, retries under the same task id, and retains invali
   const failed = await waitEditorTask(f.workspace, 'demo', request.id); assert.equal(failed.status, 'failed'); assert.match(failed.error, /503/); assert.equal(failed.output, undefined);
   f.mode('success'); await submitEditorTask(f.workspace, 'demo', request, true, f.env);
   const retried = await waitEditorTask(f.workspace, 'demo', request.id); assert.equal(retried.status, 'succeeded'); assert.equal(retried.attempt, 2); assert.equal(retried.error, undefined);
+  assert.deepEqual(retried.activity.map(attempt => [attempt.number, attempt.status, attempt.reportedTokens, attempt.unreportedCalls]), [[1, 'failed', 0, 1], [2, 'succeeded', 42, 0]]);
   f.mode('invalid'); await submitEditorTask(f.workspace, 'demo', f.input('invalid'), false, f.env);
   assert.equal((await waitEditorTask(f.workspace, 'demo', 'invalid')).status, 'failed');
   f.mode('hang'); let entered; const gate = new Promise(resolve => { entered = resolve; }); f.entered(entered);

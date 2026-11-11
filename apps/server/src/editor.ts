@@ -1,3 +1,5 @@
+import type { EditAttempt } from '@dreamatic/project-data';
+import { editActivityLog } from './edit-activity.js';
 import { validDimensions, type EditSizeOptions } from './image-edit-plan.js';
 import { EDIT_HISTORY_FILE } from '@dreamatic/project-data';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +17,7 @@ export interface EditorInput {
 }
 export interface EditorTask extends EditorInput, Partial<ImageEditDecision> {
   status: 'submitted' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+  activity?: EditAttempt[];
   attempt: number; createdAt: string; completedAt?: string; output?: ProjectFile; error?: string;
   model?: string; size?: string; recordId?: string; outputDimensions?: { width: number; height: number };
   upstreamTaskIds?: string[]; outputAvailable?: boolean; recoveredAt?: string; toolInvoked?: boolean; unavailableInputIds?: string[];
@@ -131,27 +134,32 @@ export async function submitEditorTask(workspace: string, runId: string, input: 
         if (!retry || !['failed', 'cancelled', 'interrupted'].includes(existing.status)) return structuredClone(existing);
       }
       const config = imageEditSettings(env);
-      const next: EditorTask = { id: input.id, source: input.source, ...(input.sizeOptions ? {sizeOptions: input.sizeOptions} : {}), originalPrompt: input.originalPrompt ?? input.prompt, upstreamTaskIds: journal.tasks.filter(task => task.output && input.inputIds.includes(task.output.id)).map(task => task.id), inputIds: [...input.inputIds], ...(input.inputOrdinals ? { inputOrdinals: [...input.inputOrdinals] } : {}), ...(input.promptNodeId ? { promptNodeId: input.promptNodeId } : {}), ...(input.upstream ? { upstream: structuredClone(input.upstream) } : {}), prompt: input.prompt.trim(), status: 'submitted', attempt: (existing?.attempt ?? 0) + 1, createdAt: existing?.createdAt ?? new Date().toISOString(), model: config.model };
+      const next: EditorTask = { activity: existing?.activity ?? [], id: input.id, source: input.source, ...(input.sizeOptions ? {sizeOptions: input.sizeOptions} : {}), originalPrompt: input.originalPrompt ?? input.prompt, upstreamTaskIds: journal.tasks.filter(task => task.output && input.inputIds.includes(task.output.id)).map(task => task.id), inputIds: [...input.inputIds], ...(input.inputOrdinals ? { inputOrdinals: [...input.inputOrdinals] } : {}), ...(input.promptNodeId ? { promptNodeId: input.promptNodeId } : {}), ...(input.upstream ? { upstream: structuredClone(input.upstream) } : {}), prompt: input.prompt.trim(), status: 'submitted', attempt: (existing?.attempt ?? 0) + 1, createdAt: existing?.createdAt ?? new Date().toISOString(), model: config.model };
       execute = true; record(journal, next); return structuredClone(next);
     });
     readyResolve(task);
   } catch (error) { readyReject(error); active.delete(key); finish(); throw error; }
   if (!execute) { active.delete(key); finish(); return task; }
   void (async () => {
+    const activity = editActivityLog(task.attempt, () => {
+      const value = structuredClone(task);
+      return () => transaction(workspace, runId, journal => record(journal, value));
+    });
+    task = { ...task, activity: [...(task.activity ?? []), activity.attempt] };
     try {
       task = { ...task, status: 'running' };
-      await transaction(workspace, runId, journal => record(journal, task));
+      await activity.start();
       controller.signal.throwIfAborted();
       task = { ...task, toolInvoked: true };
       const output = await editProjectImage(workspace, runId, task.inputIds, task.prompt, controller.signal, env, { taskId: task.id, attempt: task.attempt, ...(task.sizeOptions ? {sizeOptions: task.sizeOptions} : {}), originalPrompt: task.originalPrompt ?? task.prompt, ...(task.inputOrdinals ? { inputOrdinals: task.inputOrdinals } : {}) }, async (size, decision) => {
         task = { ...task, size, ...decision };
-        await transaction(workspace, runId, journal => record(journal, task));
-      });
+        await activity.write();
+      }, activity.report);
       task = { ...task, ...(output.targetDimensions ? {targetDimensions: output.targetDimensions} : {}), ...(output.requestSize ? {requestSize: output.requestSize} : {}), ...(output.dimensionStatus ? {dimensionStatus: output.dimensionStatus} : {}), status: 'succeeded', output, outputDimensions: output.outputDimensions, outputAvailable: true, model: output.model, size: output.editSize, recordId: output.editId, completedAt: new Date().toISOString() };
     } catch (error) {
       task = { ...task, status: controller.signal.aborted ? 'cancelled' : 'failed', completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) };
     }
-    try { await transaction(workspace, runId, journal => record(journal, task)); }
+    try { await activity.finish(task.status === 'succeeded' ? 'succeeded' : task.status === 'cancelled' ? 'cancelled' : 'failed'); }
     catch (error) { console.error('Editor history needs repair', error instanceof Error ? error.message : 'storage failure'); }
     finally { active.delete(key); finish(); }
   })();

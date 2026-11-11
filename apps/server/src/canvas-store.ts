@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 export interface CanvasElementState {
   id: string;
-  kind: "image" | "video" | "html" | "text" | "group" | "prompt";
+  kind: "image" | "video" | "html" | "text" | "group" | "prompt" | "solution" | "solution-prompt";
   x: number;
   y: number;
   width: number;
@@ -17,6 +17,11 @@ export interface CanvasElementState {
   role?: string;
   taskId?: string;
   outputTaskId?: string;
+  versionId?: string;
+  operation?: "revise" | "recompose" | "replace" | "fuse" | "split";
+  outputCount?: number;
+  replacement?: string;
+  sourceNotes?: Record<string, string>;
 }
 
 export interface CanvasState {
@@ -45,16 +50,21 @@ export function normalizeCanvasState(runId: string, value: unknown): CanvasState
   const elements = Array.isArray(source.elements) ? source.elements.flatMap((candidate) => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
     const item = candidate as Record<string, unknown>;
-    if (typeof item.id !== "string" || !["image", "video", "html", "text", "group", "prompt"].includes(String(item.kind))) return [];
+    if (typeof item.id !== "string" || !["image", "video", "html", "text", "group", "prompt", "solution", "solution-prompt"].includes(String(item.kind))) return [];
     if (!item.id || seen.has(item.id.slice(0, 180))) return [];
     seen.add(item.id.slice(0, 180));
     return [{
       id: item.id.slice(0, 180),
-      kind: item.kind as CanvasElementState["kind"],
+      kind: (item.kind === "solution-prompt" ? "prompt" : item.kind) as CanvasElementState["kind"],
       x: finite(item.x),
       y: finite(item.y),
-      width: Math.max(item.kind === "prompt" ? PROMPT_MIN_SIZE.width : 80, Math.min(2400, finite(item.width, 320))),
-      height: Math.max(item.kind === "prompt" ? PROMPT_MIN_SIZE.height : 40, Math.min(2400, finite(item.height, 220))),
+      width: Math.max((item.kind === "prompt" || item.kind === "solution-prompt") ? PROMPT_MIN_SIZE.width : 80, Math.min(2400, finite(item.width, 320))),
+      height: Math.max((item.kind === "prompt" || item.kind === "solution-prompt") ? PROMPT_MIN_SIZE.height : 40, Math.min(2400, finite(item.height, 220))),
+      ...(typeof item.versionId === "string" && /^[a-f0-9]{64}$/u.test(item.versionId) ? { versionId: item.versionId } : {}),
+      ...(["revise", "recompose", "replace", "fuse", "split"].includes(String(item.operation)) ? { operation: item.operation as NonNullable<CanvasElementState["operation"]> } : {}),
+      ...(typeof item.outputCount === "number" && Number.isInteger(item.outputCount) && item.outputCount >= 2 && item.outputCount <= 4 ? { outputCount: item.outputCount } : {}),
+      ...(typeof item.replacement === "string" ? { replacement: item.replacement.slice(0, 180) } : {}),
+      ...(item.sourceNotes && typeof item.sourceNotes === "object" && !Array.isArray(item.sourceNotes) ? { sourceNotes: Object.fromEntries(Object.entries(item.sourceNotes).filter(([key, value]) => /^[a-f0-9]{64}$/u.test(key) && typeof value === "string").slice(0, 8).map(([key, value]) => [key, (value as string).slice(0, 1000)])) } : {}),
       ...(typeof item.fileId === "string" ? { fileId: item.fileId } : {}),
       ...(typeof item.assetPath === "string" ? { assetPath: item.assetPath } : {}),
       ...(typeof item.text === "string" ? { text: item.text.slice(0, 20_000) } : {}),

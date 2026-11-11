@@ -108,7 +108,7 @@ export function Sidebar({ view, onChangeView, runs, activeRunId, onCreate, onSel
       <div className="search-box"><Search size={15} /><input aria-label={t("Search projects")} placeholder={t("Search projects")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
       <div className="nav-label">{t("Workspace")}</div>
       <nav aria-label={t("Workspace")}>{([
-        ["overview", "Workbench", LayoutDashboard], ["canvas", "Canvas", Layers3], ["preview", "Preview", FileImage],
+        ["overview", "Workbench", LayoutDashboard], ["canvas", "Solution editor", Layers3], ["preview", "Preview", FileImage],
         ["context", "Context", FileText], ["assets", "Asset library", Images], ["references", "References", BookOpen],
       ] as const).map(([id, label, Icon]) => <button key={id} className={`nav-item${view === id ? " active" : ""}`} aria-current={view === id ? "page" : undefined} onClick={() => onChangeView(id)}><Icon size={16} />{t(label)}</button>)}</nav>
       <div className="nav-label project-label">{t("Recent projects")}</div>

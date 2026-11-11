@@ -1,3 +1,4 @@
+import type { EditAttempt } from '@dreamatic/project-data';
 import type { AgentSession, Asset, CanvasState, RunView, SessionView, WorkflowEvent } from "./types";
 
 async function parse<T>(response: Response): Promise<T> {
@@ -302,7 +303,7 @@ export async function editProjectImage(runId: string, id: string, prompt: string
 }
 
 export interface EditorTask {
-  id: string; prompt: string; source: 'canvas' | 'natural-language'; inputIds: string[];
+  id: string; prompt: string; originalPrompt?: string; activity?: EditAttempt[]; source: 'canvas' | 'natural-language'; inputIds: string[];
   size?: string; sizeSource?: 'user' | 'base-image' | 'first-input'; baseImageId?: string;
   promptNodeId?: string; upstream?: Array<{ nodeId: string; fileId: string; taskId?: string }>;
   status: 'submitted' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
@@ -311,7 +312,7 @@ export interface EditorTask {
 export async function listEditorTasks(runId: string): Promise<EditorTask[]> {
   return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/editor`));
 }
-export async function submitEditorTask(runId: string, task: Pick<EditorTask, 'id' | 'prompt' | 'source' | 'inputIds' | 'promptNodeId' | 'upstream'>): Promise<EditorTask> {
+export async function submitEditorTask(runId: string, task: Pick<EditorTask, 'id' | 'prompt' | 'originalPrompt' | 'source' | 'inputIds' | 'promptNodeId' | 'upstream'>): Promise<EditorTask> {
   return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/editor`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(task) }));
 }
 export async function editorTaskAction(runId: string, id: string, action: 'cancel' | 'retry'): Promise<EditorTask> {
@@ -326,3 +327,49 @@ export async function planImageEdit(runId:string,id:string,prompt:string,sizeOpt
 export async function finalizeImageEdit(runId:string,editId:string,method:'scale'|'crop'|'pad'):Promise<import('./types').ProjectFile> {
   return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/media/edit/finalize`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({editId,method})}));
 }
+
+export interface SolutionVersion {
+  id: string;
+  runId: string;
+  title: string;
+  createdAt: string;
+  parentIds: string[];
+  coverPath: string;
+  heroId?: string;
+  designPath: string;
+  showcasePath: string;
+  exhibitionPath?: string;
+  images: Array<{ id: string; path: string }>;
+}
+
+export interface SolutionTaskInput {
+  id: string;
+  parentIds: string[];
+  prompt: string;
+  originalPrompt?: string;
+  operation: 'revise' | 'recompose' | 'replace' | 'fuse' | 'split';
+  outputCount: number;
+  replacement?: string;
+  sourceNotes: string[];
+  promptNodeId: string;
+}
+
+export interface SolutionTask extends SolutionTaskInput {
+  outputIds: string[];
+  createdAt?: string;
+  activity?: EditAttempt[];
+  status: 'waiting' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+  phase?: string;
+  completed?: number;
+  error?: string;
+}
+
+const solutionEndpoint = (runId: string, endpoint: string) => `/api/runs/${encodeURIComponent(runId)}/${endpoint}`;
+export const listSolutionVersions = (runId: string) => conditionalGet<SolutionVersion[]>(solutionEndpoint(runId, 'versions'));
+export const solutionFileUrl = (version: SolutionVersion, path: string) =>
+  solutionEndpoint(version.runId, `versions/${encodeURIComponent(version.id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`);
+export const listSolutionTasks = async (runId: string) => parse<SolutionTask[]>(await fetch(solutionEndpoint(runId, 'solution-tasks')));
+export const submitSolutionTask = async (runId: string, input: SolutionTaskInput) =>
+  parse<SolutionTask>(await fetch(solutionEndpoint(runId, 'solution-tasks'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }));
+export const solutionTaskAction = async (runId: string, id: string, action: 'cancel' | 'retry') =>
+  parse<SolutionTask>(await fetch(solutionEndpoint(runId, `solution-tasks/${encodeURIComponent(id)}/${action}`), { method: 'POST' }));

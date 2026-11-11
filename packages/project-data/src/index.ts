@@ -8,3 +8,4 @@ export * from "./design-categories.js";
 export type { CompletionSummary, CompletionStage, CompletionDeliverable } from './completion-summary.js';
 export * from './project-classification.js';
 export { validCanvasConnection, normalizeCanvasEdges, type CanvasEdge } from './canvas-graph.js';
+export type { EditActivity, EditAttempt } from './edit-activity.js';

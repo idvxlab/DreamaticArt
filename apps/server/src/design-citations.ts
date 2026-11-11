@@ -218,3 +218,45 @@ export function annotateCitationIssues(result: CitationReview): string {
     + result.issues.map(issue => '- ' + issue).join('\n') + '\n\n';
   return result.text.slice(0, at).trimEnd() + '\n\n' + notice + result.text.slice(at);
 }
+
+function fusionReferences(markdown: string) {
+  return referenceSections(markdown).flatMap(section =>
+    [...section.content.matchAll(/^\s*\[(\d+)\][ \t]+([^\r\n]+(?:\r?\n[ \t]+(?!\[\d+\])\S[^\r\n]*)*)/gm)]
+      .map(match => {
+        const text = match[2]!;
+        const urls = text.match(/https?:\/\/[^\s<>\])]+/g) ?? [];
+        return { id: Number(match[1]), text, key: [...new Set(urls)].sort().join('\n') };
+      })
+  );
+}
+
+/** Merge independently numbered bibliographies by source URL, preserving first-source order. */
+export function fusionCitationDirectory(designs: string[]) {
+  const sources = new Map<string, { id: number; entry: string }>();
+  const mappings = designs.map(design => {
+    const entries = fusionReferences(design);
+    const counts = new Map<number, number>();
+    const candidates = entries.flatMap(({ id: original, text, key }) => {
+      counts.set(original, (counts.get(original) ?? 0) + 1);
+      if (!key || !Number.isSafeInteger(original) || original < 1) return [];
+      let source = sources.get(key);
+      if (!source) {
+        const id = sources.size + 1;
+        source = { id, entry: `[${id}] ${text}` };
+        sources.set(key, source);
+      }
+      return [{ original, canonical: source.id }];
+    });
+    return Object.fromEntries(candidates.filter(({ original }) => counts.get(original) === 1).map(({ original, canonical }) => [original, canonical]));
+  });
+  const directory = '## References\n' + [...sources.values()].map(source => source.entry).join('\n') + '\n';
+  return { directory, mappings };
+}
+
+export function bindFusionCitations(design: string, directory: string) {
+  const allowed = new Map(fusionReferences(directory).map(({ id, key }) => [id, key]));
+  for (const { id, key } of fusionReferences(design)) {
+    if (!key || allowed.get(id) !== key) throw new Error(`Fusion reference [${id}] does not match its canonical source`);
+  }
+  return prepareDesignCitations(design, directory);
+}
