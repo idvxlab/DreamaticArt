@@ -37,6 +37,8 @@ test('project switches isolate live callbacks, completion, stop and delayed sess
     export async function getPublicationStatus(){return {site:'test',published:false,mayExist:false,inProgress:false}}
     export async function listEditorTasks(){return []}
     export async function listSolutionVersions(){return []}
+    export async function getFinalSolution(){return {versionId:null}}
+    export async function selectFinalSolution(){throw new Error('Not used in this fixture')}
     export async function listSolutionTasks(){return []}
     export function solutionFileUrl(){return ""}
     export async function submitSolutionTask(){throw new Error('Not used in this fixture')}

@@ -21,6 +21,9 @@ export interface CanvasElementState {
   operation?: "revise" | "recompose" | "replace" | "fuse" | "split";
   outputCount?: number;
   replacement?: string;
+  materialMode?: "integrate" | "replace";
+  materialSection?: string;
+  materialTargetId?: string;
   sourceNotes?: Record<string, string>;
 }
 
@@ -63,6 +66,9 @@ export function normalizeCanvasState(runId: string, value: unknown): CanvasState
       ...(typeof item.versionId === "string" && /^[a-f0-9]{64}$/u.test(item.versionId) ? { versionId: item.versionId } : {}),
       ...(["revise", "recompose", "replace", "fuse", "split"].includes(String(item.operation)) ? { operation: item.operation as NonNullable<CanvasElementState["operation"]> } : {}),
       ...(typeof item.outputCount === "number" && Number.isInteger(item.outputCount) && item.outputCount >= 2 && item.outputCount <= 4 ? { outputCount: item.outputCount } : {}),
+      ...(item.materialMode === "integrate" || item.materialMode === "replace" ? { materialMode: item.materialMode as "integrate" | "replace" } : {}),
+      ...(typeof item.materialSection === "string" ? { materialSection: item.materialSection.slice(0, 200) } : {}),
+      ...(typeof item.materialTargetId === "string" && /^[a-zA-Z0-9_-]+$/u.test(item.materialTargetId) ? { materialTargetId: item.materialTargetId } : {}),
       ...(typeof item.replacement === "string" ? { replacement: item.replacement.slice(0, 180) } : {}),
       ...(item.sourceNotes && typeof item.sourceNotes === "object" && !Array.isArray(item.sourceNotes) ? { sourceNotes: Object.fromEntries(Object.entries(item.sourceNotes).filter(([key, value]) => /^[a-f0-9]{64}$/u.test(key) && typeof value === "string").slice(0, 8).map(([key, value]) => [key, (value as string).slice(0, 1000)])) } : {}),
       ...(typeof item.fileId === "string" ? { fileId: item.fileId } : {}),

@@ -1,5 +1,5 @@
 import { listSolutionTasks, projectSolutionTasksInProgress, solutionTaskAction, solutionTasksInProgress, stopSolutionTasks, submitSolutionTask } from './solution-tasks.js';
-import { listSolutionVersions, readSolutionFile } from './solution-versions.js';
+import { getFinalSolutionId, listSolutionVersions, readSolutionFile, setFinalSolutionId } from './solution-versions.js';
 import { finalizeImageEdit } from './image-edit-output.js';
 import { preflightImageEdit } from './image-edit.js';
 import { submitEditorTask, listEditorTasks, cancelEditorTask, waitEditorTask, type EditorInput } from './editor.js';
@@ -374,7 +374,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     const exportMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/export$/);
     if (request.method === "GET" && exportMatch?.[1]) {
-      const archive = await prepareProjectExport(workspaceDir, decodeURIComponent(exportMatch[1]));
+      const runId = decodeURIComponent(exportMatch[1]);
+      const versionId = url.searchParams.get('versionId') ?? undefined;
+      const archive = await prepareProjectExport(workspaceDir, runId, versionId === undefined ? {} : { versionId });
       try {
         const info = await stat(archive.path);
         response.writeHead(200, { "Content-Type": "application/zip", "Content-Length": info.size, "Content-Disposition": `attachment; filename="${archive.filename}"`, "Cache-Control": "no-store" });
@@ -411,6 +413,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       if (run) conditionalJson(request, response, run); else json(response, 404, { error: "Run not found" });
       return;
     }
+    const finalSolutionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/final-solution$/);
+    if (finalSolutionMatch?.[1] && (request.method === 'GET' || request.method === 'PUT')) {
+      const runId = decodeURIComponent(finalSolutionMatch[1]);
+      const versionId = request.method === 'GET' ? await getFinalSolutionId(workspaceDir, runId)
+        : await setFinalSolutionId(workspaceDir, runId, record(await body(request)).versionId);
+      response.setHeader('Cache-Control', 'no-store');
+      json(response, 200, { versionId });
+      return;
+    }
     const versionMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/versions(?:\/([^/]+)\/files\/(.+))?$/);
     if (request.method === 'GET' && versionMatch?.[1]) {
       const runId = decodeURIComponent(versionMatch[1]);
@@ -418,14 +429,25 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
         conditionalJson(request, response, await listSolutionVersions(workspaceDir, runId));
       } else {
         const file = await readSolutionFile(workspaceDir, runId, versionMatch[2], decodeURIComponent(versionMatch[3]!));
-        response.writeHead(200, {
+        const video = file.contentType.startsWith('video/');
+        const header = video && request.headers.range;
+        const range = header ? mediaRange(header, file.bytes.length) : undefined;
+        if (header && !range) {
+          response.writeHead(416, { 'Content-Range': `bytes */${file.bytes.length}` });
+          response.end();
+          return;
+        }
+        const bytes = range ? file.bytes.subarray(range.start, range.end + 1) : file.bytes;
+        response.writeHead(range ? 206 : 200, {
           'Content-Type': file.contentType,
-          'Content-Length': file.bytes.length,
+          'Content-Length': bytes.length,
+          ...(video ? { 'Accept-Ranges': 'bytes' } : {}),
+          ...(range ? { 'Content-Range': `bytes ${range.start}-${range.end}/${file.bytes.length}` } : {}),
           'X-Content-Type-Options': 'nosniff',
-          'Content-Security-Policy': "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+          'Content-Security-Policy': "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'",
           'Referrer-Policy': 'no-referrer',
         });
-        response.end(file.bytes);
+        response.end(bytes);
       }
       return;
     }

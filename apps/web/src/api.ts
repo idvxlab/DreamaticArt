@@ -207,8 +207,8 @@ export async function streamPrompt(
 }
 
 /** Download the package without asking an agent to regenerate or export it. */
-export async function downloadProject(runId: string): Promise<void> {
-  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/export`);
+export async function downloadProject(runId: string, versionId?: string): Promise<void> {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/export${versionId ? `?versionId=${encodeURIComponent(versionId)}` : ""}`);
   if (!response.ok) {
     const value = await response.json().catch(() => ({})) as { error?: string };
     throw new Error(value.error ?? "Project export failed");
@@ -248,12 +248,12 @@ export async function downloadProject(runId: string): Promise<void> {
 
 export interface PublishCreator { name: string; affiliation: string; website: string }
 export interface PublishProgress { phase: "packaging" | "uploading" | "deploying" | "completed" | "failed"; uploadedBytes: number; totalBytes: number; error?: string }
-export interface PublicationStatus { site: string; published: boolean; mayExist: boolean; inProgress: boolean; creator?: PublishCreator; receipt?: { projectId: string; previewUrl: string; galleryUrl: string }; progress?: PublishProgress }
+export interface PublicationStatus { site: string; published: boolean; mayExist: boolean; inProgress: boolean; versionId?: string | null; creator?: PublishCreator; receipt?: { projectId: string; previewUrl: string; galleryUrl: string }; progress?: PublishProgress }
 export async function getPublicationStatus(runId: string): Promise<PublicationStatus> {
   return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/publish`, { cache: "no-store" }));
 }
-export async function publishProject(runId: string, creator: PublishCreator, overwriteConfirmed: boolean): Promise<{ projectId: string; previewUrl: string; galleryUrl: string }> {
-  return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, creator, overwriteConfirmed }) }));
+export async function publishProject(runId: string, creator: PublishCreator, overwriteConfirmed: boolean, versionId: string | null): Promise<{ projectId: string; previewUrl: string; galleryUrl: string }> {
+  return parse(await fetch(`/api/runs/${encodeURIComponent(runId)}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, creator, overwriteConfirmed, versionId }) }));
 }
 
 export async function openProjectAssets(runId: string): Promise<void> {
@@ -340,9 +340,19 @@ export interface SolutionVersion {
   showcasePath: string;
   exhibitionPath?: string;
   images: Array<{ id: string; path: string }>;
+  videos?: Array<{ id: string; path: string; title: string }>;
+  works?: Array<{ id: string; section: string; role: string }>;
+}
+
+export interface MaterialEditInput {
+  mode: 'integrate' | 'replace';
+  fileIds: string[];
+  section?: string;
+  targetId?: string;
 }
 
 export interface SolutionTaskInput {
+  materialEdit?: MaterialEditInput;
   id: string;
   parentIds: string[];
   prompt: string;
@@ -366,6 +376,10 @@ export interface SolutionTask extends SolutionTaskInput {
 
 const solutionEndpoint = (runId: string, endpoint: string) => `/api/runs/${encodeURIComponent(runId)}/${endpoint}`;
 export const listSolutionVersions = (runId: string) => conditionalGet<SolutionVersion[]>(solutionEndpoint(runId, 'versions'));
+export const getFinalSolution = async (runId: string) =>
+  parse<{ versionId: string | null }>(await fetch(solutionEndpoint(runId, 'final-solution'), { cache: 'no-store' }));
+export const selectFinalSolution = async (runId: string, versionId: string) =>
+  parse<{ versionId: string }>(await fetch(solutionEndpoint(runId, 'final-solution'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId }) }));
 export const solutionFileUrl = (version: SolutionVersion, path: string) =>
   solutionEndpoint(version.runId, `versions/${encodeURIComponent(version.id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`);
 export const listSolutionTasks = async (runId: string) => parse<SolutionTask[]>(await fetch(solutionEndpoint(runId, 'solution-tasks')));

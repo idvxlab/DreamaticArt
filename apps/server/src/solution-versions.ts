@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { plannedImages } from './design-images.js';
-import { showcaseDirectionMarkdown, type ShowcaseDirection, validateShowcaseDirection, validateShowcaseHtml, type GeneratedShowcaseImage } from './showcase.js';
+import { showcaseDirectionMarkdown, type ShowcaseDirection, type ShowcaseWork, validateShowcaseDirection, validateShowcaseHtml, type GeneratedShowcaseImage } from './showcase.js';
 
 const page = 'final/00-index.html';
 const design = 'design.md';
@@ -26,6 +26,8 @@ export interface SolutionVersion {
   coverPath: string;
   heroId: string;
   images: Array<{ id: string; path: string }>;
+  videos?: Array<{ id: string; path: string; title: string }>;
+  works?: ShowcaseWork[];
   files: Record<string, string>;
 }
 
@@ -172,6 +174,14 @@ async function metadata(root: string, id: string) {
   return { path, version: { ...version, heroId: version.heroId ?? version.images.find(image => image.path === version.coverPath)?.id } };
 }
 
+export async function solutionWorks(workspace: string, version: SolutionVersion) {
+  if (version.works) return version.works;
+  if (!version.exhibitionPath) return [];
+  const markdown = (await readSolutionFile(workspace, version.runId, version.id, version.exhibitionPath)).bytes.toString('utf8');
+  const inventory = markdown.split('All works in narrative order:\n')[1]?.split(/\r?\n\s*\r?\n/u)[0] ?? '';
+  return [...inventory.matchAll(/^- ([a-zA-Z0-9_-]+) — ([^;]+); ([^;]+); (.+)$/gmu)].map(match => ({ id: match[1]!, role: match[2]!, section: match[3]!, purpose: match[4]! }));
+}
+
 export async function listSolutionVersions(workspace: string, runId: string) {
   await snapshotCompletedDesign(workspace, runId);
   const root = await solutionProjectDirectory(workspace, runId);
@@ -184,7 +194,7 @@ export async function listSolutionVersions(workspace: string, runId: string) {
     ids.push(...(await readdir(batch, { withFileTypes: true })).filter(child => child.isDirectory() && versionId.test(child.name) && child.name.startsWith(entry.name.slice(6))).map(child => child.name));
   }
   const versions = await Promise.all(ids.map(id => metadata(root, id)));
-  return versions.map(({ version }) => version).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return (await Promise.all(versions.map(async ({ version }) => ({ ...version, works: await solutionWorks(workspace, version).catch(() => []) })))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export async function readSolutionFile(workspace: string, runId: string, id: string, file: string) {
@@ -201,6 +211,31 @@ export async function findSolutionVersion(workspace: string, runId: string, id: 
   return entry?.version;
 }
 
+const finalSelection = 'final-solution.json';
+
+export async function getFinalSolutionId(workspace: string, runId: string): Promise<string | null> {
+  const root = await solutionProjectDirectory(workspace, runId);
+  const bytes = await optional(read(root, finalSelection));
+  if (!bytes) return null;
+  const { versionId: id } = JSON.parse(bytes.toString('utf8'));
+  if (typeof id !== 'string' || !versionId.test(id)) throw new Error('Invalid final solution selection');
+  return id;
+}
+
+export async function setFinalSolutionId(workspace: string, runId: string, id: unknown) {
+  if (typeof id !== 'string' || !versionId.test(id)) throw new Error('Invalid version ID');
+  const version = await findSolutionVersion(workspace, runId, id);
+  if (!version) throw new Error('Unknown solution version');
+  await readSolutionFile(workspace, runId, id, version.showcasePath);
+  const root = await solutionProjectDirectory(workspace, runId);
+  const temporary = join(root, `.${finalSelection}.${randomUUID()}`);
+  try {
+    await writeFile(temporary, JSON.stringify({ versionId: id }), { flag: 'wx' });
+    await rename(temporary, join(root, finalSelection));
+  } finally { await rm(temporary, { force: true }); }
+  return id;
+}
+
 async function batchVersionDirectory(root: string, id: string) {
   const versions = await versionDirectory(root);
   const path = join(versions, 'batch-' + id.slice(0, 62), id);
@@ -214,6 +249,7 @@ export interface SolutionDelivery {
   direction: ShowcaseDirection;
   generated: Record<string, GeneratedShowcaseImage>;
   staging: string;
+  videoTitles?: Record<string, string>;
 }
 
 export async function publishSolutionBatch(input: {
@@ -232,27 +268,36 @@ export async function publishSolutionBatch(input: {
     for (const [index, delivery] of deliveries.entries()) {
       signal.throwIfAborted();
       const { designText, html, direction, generated, staging } = delivery;
-      const images = direction.works.map(({ id }) => ({ id, path: generated[id]!.path }));
-      const files = new Map<string, Buffer>([[design, Buffer.from(designText)], [exhibition, Buffer.from(showcaseDirectionMarkdown(direction))], [page, Buffer.from(html)]]);
-      for (const { id, path } of images) {
-        const bytes = await read(staging, path);
-        if (hash(bytes) !== generated[id]!.digest) throw new Error('Staged image changed');
-        files.set(path, bytes);
-      }
+      const assets = direction.works.map(({ id }) => ({ id, path: generated[id]!.path }));
+      const images = assets.filter(({ id }) => generated[id]!.kind !== 'video');
+      const videos = assets.filter(({ id }) => generated[id]!.kind === 'video').map(asset => ({ ...asset, title: delivery.videoTitles?.[asset.id] ?? asset.id }));
       const id = outputIds[index]!;
+      const target = join(temporary, id);
+      const files: Record<string, string> = Object.create(null);
+      for (const [path, text] of [[design, designText], [exhibition, showcaseDirectionMarkdown(direction)], [page, html]] as const) {
+        const bytes = Buffer.from(text);
+        const destination = join(target, path);
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, bytes);
+        files[path] = hash(bytes);
+      }
+      for (const { id, path } of assets) {
+        signal.throwIfAborted();
+        const bytes = await read(staging, path);
+        const checksum = hash(bytes);
+        if (checksum !== generated[id]!.digest) throw new Error('Staged material changed');
+        const destination = join(target, path);
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, bytes);
+        files[path] = checksum;
+      }
       const title = /^#\s+(.+)$/mu.exec(designText)?.[1]?.trim() || parents[0]!.title;
       const version: SolutionVersion = {
         id, runId, title, createdAt, parentIds: parents.map(parent => parent.id), taskId,
         designPath: design, showcasePath: page, exhibitionPath: exhibition, exhibitionStatus: 'original',
-        coverPath: generated[direction.heroId]!.path, heroId: direction.heroId, images,
-        files: Object.fromEntries([...files].map(([path, bytes]) => [path, hash(bytes)]))
+        coverPath: generated[direction.heroId]!.path, heroId: direction.heroId, images, ...(videos.length ? { videos } : {}), works: direction.works,
+        files
       };
-      const target = join(temporary, id);
-      for (const [path, bytes] of files) {
-        const destination = join(target, path);
-        await mkdir(dirname(destination), { recursive: true });
-        await writeFile(destination, bytes);
-      }
       await writeFile(join(target, 'version.json'), JSON.stringify(version, null, 2));
     }
     signal.throwIfAborted();

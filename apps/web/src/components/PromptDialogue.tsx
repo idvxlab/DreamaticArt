@@ -19,12 +19,24 @@ function activityGroups(events: EditActivity[]) {
       groups.push(group);
     }
     const pending = event.state === 'started' ? -1 : group.actions.findIndex(
-      action => action.state === 'started' && action.label === event.label && action.detail === event.detail
+      action => action.state === 'started' && action.label === event.label &&
+        (event.callId ? action.callId === event.callId : action.detail === event.detail)
     );
     if (pending < 0) group.actions.push(event);
     else group.actions[pending] = event;
   }
   return groups;
+}
+
+function activityStatus(event: EditActivity, events: EditActivity[], finished: boolean) {
+  if (event.state === 'started') return finished ? 'interrupted' : 'started';
+  if (event.label !== 'plan_showcase') return event.state;
+  const index = events.indexOf(event);
+  if (event.state === 'failed') {
+    if (events.some((entry, position) => entry.label === event.label && entry.state === 'completed' && position > index)) return 'Rejected, later corrected';
+    return finished ? 'failed' : 'Awaiting correction';
+  }
+  return events.some((entry, position) => entry.label === event.label && entry.state === 'failed' && position < index) ? 'Corrected' : 'completed';
 }
 
 function AttemptLog({ attempt, interrupted, latest }: { attempt: EditAttempt; interrupted: boolean; latest: boolean }) {
@@ -51,7 +63,7 @@ function AttemptLog({ attempt, interrupted, latest }: { attempt: EditAttempt; in
               {visibleActions.map((event, actionIndex) => <li key={actionIndex} data-state={event.state}>
                 <Circle size={7} fill="currentColor" aria-hidden="true" />
                 <span>{t(actionNames[event.label] ?? event.label)}{event.detail && <small>{event.detail}</small>}</span>
-                <small title={new Date(event.at).toLocaleString()}>{t(event.state === 'started' && finished ? 'interrupted' : event.state)}</small>
+                <small title={new Date(event.at).toLocaleString()}>{t(activityStatus(event, attempt.events, finished))}</small>
               </li>)}
             </ol>
           </details>
@@ -92,12 +104,12 @@ export function PromptDialogue({ tasks, versions, files, runId, latestId, childr
         return <section key={task.id} className="prompt-exchange">
           <div className="workflow-message-row user"><div className="workflow-message-bubble">
             <small>{t('You')}{task.createdAt ? ` · ${new Date(task.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</small>
-            <p className="prompt-user-message">{task.originalPrompt ?? task.prompt}</p>
+            <p className="prompt-user-message">{task.originalPrompt ?? (solution && task.materialEdit ? t(task.prompt) : task.prompt)}</p>
           </div></div>
           <details className="prompt-submitted-inputs">
             <summary>{t('Submitted inputs')}</summary>
-            <ol>{(solution ? task.parentIds : task.inputIds).map((id, index) => <li key={id}>
-              {solution ? versions.find(version => version.id === id)?.title ?? id : files.find(file => file.id === id)?.title ?? id}
+            <ol>{(solution ? [...task.parentIds, ...(task.materialEdit?.fileIds ?? [])] : task.inputIds).map((id, index) => <li key={id}>
+              {versions.find(version => version.id === id)?.title ?? files.find(file => file.id === id)?.title ?? id}
               {solution && task.sourceNotes[index] ? ` — ${task.sourceNotes[index]}` : ''}
             </li>)}</ol>
           </details>

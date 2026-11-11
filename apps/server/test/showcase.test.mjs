@@ -19,6 +19,8 @@ test('independent textual curation requires every planned work, without inspecti
  await assert.rejects(plan.execute('plan',{...params,works:[works[0]]}),/Every planned work.*detail/);
  await assert.rejects(plan.execute('plan',{...params,works:[...works,works[0]]}),/distinct/);
  await assert.rejects(plan.execute('plan',{...params,works:[...works,{...works[0],id:'unknown'}]}),/Unknown planned/);
+ await assert.rejects(plan.execute('plan',{...params,works:[works[0],works[0],{...works[0],id:'unknown'}]}),error =>
+  /distinct.*hero/.test(error.message) && /Unknown planned.*unknown/.test(error.message) && /Every planned work.*detail/.test(error.message));
  await assert.rejects(plan.execute('plan',{...params,heroId:'unknown'}),/hero/);
  await assert.rejects(plan.execute('plan',{...params,direction:'   '}),/project-specific/);
  await assert.rejects(plan.execute('plan',{...params,works:[works[0],{...works[1],purpose:' '}]}),/purpose/);

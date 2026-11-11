@@ -5,6 +5,7 @@ import { lstat, mkdir, readFile, realpath, rename, stat, writeFile } from "node:
 import { dirname, join, sep } from "node:path";
 import { Readable } from "node:stream";
 import { prepareProjectExport } from "./project-export.js";
+import { getFinalSolutionId } from "./solution-versions.js";
 
 export interface Creator { name: string; affiliation: string; website: string }
 export const DEFAULT_SITE_URL = "https://www.dreamatic.art/";
@@ -34,7 +35,7 @@ export function publicationEndpoint(site: string): URL {
 }
 export interface PublicationReceipt { projectId: string; previewUrl: string; galleryUrl: string }
 export interface PublishProgress { phase: "packaging" | "uploading" | "deploying" | "completed" | "failed"; uploadedBytes: number; totalBytes: number; error?: string }
-interface SavedPublication { deliveryAttempted?: boolean; publicationId: string; updateToken: string; creator?: Creator; receipt?: PublicationReceipt; publishedAt?: string }
+interface SavedPublication { deliveryAttempted?: boolean; publicationId: string; updateToken: string; creator?: Creator; receipt?: PublicationReceipt; publishedAt?: string; versionId?: string | null }
 const active = new Map<string, PublishProgress>();
 async function publicationFile(workspaceDir: string, runId: string): Promise<string> {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(runId)) throw new Error("Invalid run id");
@@ -77,7 +78,7 @@ export async function publicationStatus(workspaceDir: string, runId: string, sit
     } catch { /* Keep unknown attempts conservative when the site is unavailable. */ }
   }
   const progress = active.get(path);
-  return { site: endpoint.origin, published: Boolean(saved?.receipt), mayExist: Boolean(saved && (saved.receipt || saved.deliveryAttempted !== false)), creator: saved?.creator, receipt: saved?.receipt, publishedAt: saved?.publishedAt, inProgress: Boolean(progress && !["completed", "failed"].includes(progress.phase)), ...(progress ? { progress } : {}) };
+  return { site: endpoint.origin, published: Boolean(saved?.receipt), mayExist: Boolean(saved && (saved.receipt || saved.deliveryAttempted !== false)), creator: saved?.creator, receipt: saved?.receipt, versionId: saved?.versionId ?? null, publishedAt: saved?.publishedAt, inProgress: Boolean(progress && !["completed", "failed"].includes(progress.phase)), ...(progress ? { progress } : {}) };
 }
 export async function publishProject(workspaceDir: string, runId: string, input: unknown, site: string, modelConfig: NodeJS.ProcessEnv = process.env): Promise<PublicationReceipt> {
   const args = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -90,11 +91,15 @@ export async function publishProject(workspaceDir: string, runId: string, input:
   let uploadStream: Readable | undefined;
   let archive: Awaited<ReturnType<typeof prepareProjectExport>> | undefined;
   try {
-    const manifest = JSON.parse(await readFile(join(dirname(dirname(path)), "artifacts/artifact-manifest.json"), "utf8"));
-    const imageDeliverables = Array.isArray(manifest.artifacts) ? manifest.artifacts.filter((item: { method?: string; path?: string }) => ["image_generate", "image_edit"].includes(item.method ?? "") && typeof item.path === "string" && /^artifacts\/(?!.*(?:^|\/)\.\.(?:\/|$)).+\.(png|jpe?g|webp|gif)$/i.test(item.path)) : [];
-    const hasImages = (await Promise.all(imageDeliverables.map((item: { path: string }) => stat(join(dirname(dirname(path)), item.path)).then(info => info.isFile() && info.size > 0).catch(() => false)))).some(Boolean);
-    if (!hasImages && (manifest.presentation?.mode === "html" || manifest.htmlEntries?.length || manifest.artifacts?.some((item: { method?: string }) => item.method === "html_generate"))) {
-      throw new Error("HTML UX/UI projects cannot currently be published to the official Gallery");
+    const versionId = await getFinalSolutionId(workspaceDir, runId);
+    if (args.versionId !== undefined && args.versionId !== versionId) throw new Error("The final solution changed. Reopen Preview before publishing.");
+    if (!versionId) {
+      const manifest = JSON.parse(await readFile(join(dirname(dirname(path)), "artifacts/artifact-manifest.json"), "utf8"));
+      const imageDeliverables = Array.isArray(manifest.artifacts) ? manifest.artifacts.filter((item: { method?: string; path?: string }) => ["image_generate", "image_edit"].includes(item.method ?? "") && typeof item.path === "string" && /^artifacts\/(?!.*(?:^|\/)\.\.(?:\/|$)).+\.(png|jpe?g|webp|gif)$/i.test(item.path)) : [];
+      const hasImages = (await Promise.all(imageDeliverables.map((item: { path: string }) => stat(join(dirname(dirname(path)), item.path)).then(info => info.isFile() && info.size > 0).catch(() => false)))).some(Boolean);
+      if (!hasImages && (manifest.presentation?.mode === "html" || manifest.htmlEntries?.length || manifest.artifacts?.some((item: { method?: string }) => item.method === "html_generate"))) {
+        throw new Error("HTML UX/UI projects cannot currently be published to the official Gallery");
+      }
     }
     const saved = await records(path);
     const previous = saved[endpoint.origin];
@@ -113,7 +118,7 @@ export async function publishProject(workspaceDir: string, runId: string, input:
       return model ? [{ model, provider: modelConfig.DREAMATIC_PROVIDER_NAME || "", role, source: "publication_config_fallback" }] : [];
     });
     const modelFallback: ModelUsage = { schemaVersion: 1, reasoning, generation: [{ model: modelConfig.DREAMATIC_IMAGE_MODEL ?? "gpt-image-1", provider: "", source: "publication_config_fallback" }] };
-    archive = await prepareProjectExport(workspaceDir, runId, { publication: { schemaVersion: 1, publicationId, creator, overwrite: args.overwriteConfirmed === true }, modelFallback });
+    archive = await prepareProjectExport(workspaceDir, runId, { publication: { schemaVersion: 1, publicationId, creator, overwrite: args.overwriteConfirmed === true }, modelFallback, ...(versionId ? { versionId } : {}) });
     const size = (await stat(archive.path)).size;
     if (size > PUBLISH_MAX_BYTES) throw new Error("Publication ZIP exceeds the 128 MB upload limit");
     progress.totalBytes = size; progress.phase = "uploading";
@@ -142,7 +147,7 @@ export async function publishProject(workspaceDir: string, runId: string, input:
     }
     if (!value || typeof value.projectId !== "string" || typeof value.previewUrl !== "string" || !value.previewUrl.startsWith("/gallery-assets/") || typeof value.galleryUrl !== "string" || !value.galleryUrl.startsWith("/#gallery")) throw new Error("DreamaticSite returned an invalid publication receipt");
     const receipt = { projectId: value.projectId, previewUrl: new URL(value.previewUrl, endpoint.origin).href, galleryUrl: new URL(value.galleryUrl, endpoint.origin).href };
-    saved[endpoint.origin] = { ...current, receipt, publishedAt: new Date().toISOString() };
+    saved[endpoint.origin] = { ...current, receipt, versionId, publishedAt: new Date().toISOString() };
     await saveRecords(path, saved);
     progress.uploadedBytes = size; progress.phase = "completed";
     return receipt;

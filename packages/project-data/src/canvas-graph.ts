@@ -10,7 +10,7 @@ export function canvasConnectionIssue(nodes: GraphNode[], edges: CanvasEdge[], s
   const from = kind(source), to = kind(target);
   const isInput = (value: string | undefined) => value === 'image' || value === 'solution';
   if (source === target) return 'cycle';
-  if (!((isInput(from) && to === 'prompt') || (from === 'prompt' && isInput(to)))) return 'incompatible';
+  if (!(((isInput(from) || from === 'video') && to === 'prompt') || (from === 'prompt' && isInput(to)))) return 'incompatible';
   if (edges.some(edge => edge.source === source && edge.target === target)) return 'duplicate';
   // A creation chain is a DAG; cycles cannot express a material's provenance.
   const pending = [target], visited = new Set<string>();

@@ -4,6 +4,7 @@ export interface EditActivity {
   label: string;
   state: 'started' | 'completed' | 'failed';
   detail?: string;
+  callId?: string;
 }
 
 export interface EditAttempt {

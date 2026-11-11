@@ -180,11 +180,12 @@ export async function explicitSkillInstructions(options: { root: string; catalog
 export function createScopedSkillReadTool(options: { root: string; catalog: SkillCatalog; promptRoots?: string[]; delegate?: ToolDefinition; sessionId: () => string; requestedSkills?: string[] }): ToolDefinition {
   const native = options.delegate ?? createReadToolDefinition(options.root);
   let writes = Promise.resolve();
-  return { name: native.name, label: native.label, parameters: native.parameters, description: native.description + ' Read only the current run, approved Skill resources, or role prompts. Skill resources are knowledge; reading scripts does not execute them.',
+  return { name: native.name, label: native.label, parameters: native.parameters, description: native.description + ' Read only the current run, approved Skill resources, or role prompts. Pass the exact approved Skill name or file path to open its SKILL.md. Skill resources are knowledge; reading scripts does not execute them.',
     async execute(callId, params, signal, onUpdate, context) {
       const input = params as ReadToolInput;
       if (typeof input.path !== 'string') throw new Error('Read requires a file path');
-      const path = await realpath(pathFrom(options.root, input.path));
+      const namedSkill = options.catalog.entries.find(entry => entry.skill.name === input.path);
+      const path = await realpath(namedSkill?.skill.filePath ?? pathFrom(options.root, input.path));
       const selected = new Set(options.requestedSkills ?? []);
       const rootCandidates = [options.root, ...(options.promptRoots ?? [])].map(path => ({ path, frozen: false }));
       rootCandidates.push(...options.catalog.entries.filter(entry => !entry.skill.disableModelInvocation || selected.has(entry.skill.name)).map(entry => ({ path: entry.skill.baseDir, frozen: true })));

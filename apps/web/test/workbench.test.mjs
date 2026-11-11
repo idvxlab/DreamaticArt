@@ -45,11 +45,20 @@ test('six workbench views preserve conversation, canvas and project isolation an
   }
   const initialVersions = [version('a', 'First study'), version('b', 'Second study')];
   const versions = [...initialVersions];
+  const finalSelections = new Map();
+  const publications = [];
   function attempt(number, status, actor = 'builder') {
     return {
       number, status, submittedAt: '2026-01-01T00:00:00Z', startedAt: '2026-01-01T00:00:01Z', endedAt: '2026-01-01T00:00:04Z',
       reportedCalls: status === 'succeeded' ? 1 : 0, reportedTokens: status === 'succeeded' ? 42 : 0, unreportedCalls: 1,
-      events: [{ at: '2026-01-01T00:00:02Z', actor, label: 'plan_showcase', state: status === 'succeeded' ? 'completed' : 'failed' }],
+      events: [
+        { at: '2026-01-01T00:00:02Z', actor, label: 'plan_showcase', callId: 'first', state: 'started' },
+        { at: '2026-01-01T00:00:02.100Z', actor, label: 'plan_showcase', callId: 'first', state: 'failed', detail: 'Missing required work lamp' },
+        ...(status === 'succeeded' ? [
+          { at: '2026-01-01T00:00:03Z', actor, label: 'plan_showcase', callId: 'second', state: 'started' },
+          { at: '2026-01-01T00:00:03.100Z', actor, label: 'plan_showcase', callId: 'second', state: 'completed' },
+        ] : []),
+      ],
     };
   }
   const solutionTasks = [];
@@ -85,8 +94,31 @@ test('six workbench views preserve conversation, canvas and project isolation an
       assert.ok(bytes>0);const path='inputs/user-assets/'+name;files.push({id:path,path,title:name,kind:name.split('.').at(-1),category:'assets',group:'Uploaded files'});json({id:path});return;
     }
     if (url.pathname.endsWith('/references/read')) { json({ title: 'Reference article', url: 'https://example.org/source', embeddingBlocked: false, nodes: [{ tag: 'p', children: [{ tag: 'text', text: 'Readable reference content' }] }] }); return; }
-    if (url.pathname.endsWith('/publish')) { json({ published: false, mayExist: false, inProgress: false }); return; }
+    if (url.pathname.endsWith('/publish')) {
+      if (req.method === 'POST') {
+        let body = ''; for await (const part of req) body += part;
+        publications.push(JSON.parse(body));
+        json({ previewUrl: 'https://example.test/gallery-assets/project/artifacts/00-gallery.html', galleryUrl: 'https://example.test/#gallery' });
+      } else json({ site: 'https://example.test', published: false, mayExist: false, inProgress: false });
+      return;
+    }
+    if (url.pathname.endsWith('/final-solution')) {
+      const id = url.pathname.split('/')[3];
+      if (req.method === 'PUT') {
+        let body = ''; for await (const part of req) body += part;
+        finalSelections.set(id, JSON.parse(body).versionId);
+      }
+      json({ versionId: finalSelections.get(id) ?? null });
+      return;
+    }
     if (url.pathname.endsWith('/versions')) { json(url.pathname.includes('/A/') ? versions : []); return; }
+    if (url.pathname.includes('/versions/') && url.pathname.endsWith('/final/00-index.html')) {
+      const version = versions.find(entry => entry.id === url.pathname.split('/')[5]);
+      res.setHeader('Content-Type', 'text/html');
+      res.setHeader('Content-Security-Policy', "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'");
+      res.end(`<h1>${version.title}</h1><img src="../artifacts/design.png" alt="Version image">`);
+      return;
+    }
     if (url.pathname.includes('/versions/') && url.pathname.endsWith('.png')) {
       res.setHeader('Content-Type', 'image/png');
       res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'));
@@ -113,6 +145,14 @@ test('six workbench views preserve conversation, canvas and project isolation an
       if (req.method === 'GET') { json(solutionTasks); return; }
       let body = ''; for await (const part of req) body += part;
       const input = JSON.parse(body);
+      if (input.materialEdit) {
+        const output = version('f', 'Material revision', input.parentIds);
+        versions.unshift(output);
+        const task = { ...input, status: 'succeeded', outputIds: [output.id], activity: [attempt(1, 'succeeded')] };
+        solutionTasks.push(task);
+        json(task);
+        return;
+      }
       const fusion = input.operation === 'fuse';
       const outputIds = (fusion ? ['c'] : ['d', 'e']).map(id => id.repeat(64));
       if (fusion) versions.unshift(version('c', 'Fusion', input.parentIds));
@@ -347,7 +387,13 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.locator('.overview-images').getByRole('button',{name:'Showcase Page',exact:true}).waitFor();
   assert.equal(await page.locator('.overview-images img').count(),0);
   assert.equal(await page.getByRole('heading',{name:'Generated Works',exact:true}).count(),1);
+  files.push({ id: 'artifacts/design.png', path: 'artifacts/design.png', title: 'Design image', kind: 'png', category: 'assets', group: 'Generated works' });
   await nav('Solution editor').click();
+  const librarySwitch = page.getByRole('group', { name: 'Editor library' });
+  await librarySwitch.getByRole('button', { name: 'Assets', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh files', exact: true }).click();
+  await page.locator('.workspace-file-item').filter({ hasText: 'Design image' }).waitFor();
+  await librarySwitch.getByRole('button', { name: 'Versions', exact: true }).click();
   const library = page.getByRole('region', { name: 'Solution versions' });
   await library.getByText('First study', { exact: true }).waitFor();
   await library.locator('article').filter({ hasText: 'First study' }).getByRole('button', { name: 'Add solution to editor' }).click();
@@ -386,8 +432,9 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await fusionPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).fill('Combine the two concepts');
   const imageCard = page.locator('.canvas-media:not(.canvas-solution)').filter({ has: page.locator('[data-port-side="right"]') }).first();
   await connect(imageCard);
-  await fusionPrompt.getByText('This edit has both images and solutions. Disconnect one input type to run it.').waitFor();
-  assert.equal(await fusionPrompt.getByRole('button', { name: 'Run solution edit' }).isDisabled(), true);
+  await fusionPrompt.getByText('Connect one solution to edit its materials.').waitFor();
+  assert.equal(await fusionPrompt.locator('textarea').count(), 0);
+  assert.equal(await fusionPrompt.getByRole('button', { name: 'Generate new version' }).isDisabled(), true);
   await page.locator('.canvas-connections [data-edge-id]').last().press('Delete');
   await fusionPrompt.getByRole('button', { name: 'Run solution edit' }).click();
   await cards.filter({ hasText: 'Fusion' }).waitFor({ state: 'attached' });
@@ -445,6 +492,11 @@ test('six workbench views preserve conversation, canvas and project isolation an
   const restoredConversation = page.locator('.canvas-solution-prompt').last();
   assert.equal(await restoredConversation.locator('.prompt-user-message').textContent(), '/split 2 Independent directions');
   assert.equal(await restoredConversation.locator('.prompt-attempt').count(), 3);
+  const actions = restoredConversation.locator('.prompt-attempt').last().locator('.prompt-action-list li');
+  assert.equal(await actions.count(), 2);
+  assert.match(await actions.first().textContent(), /Missing required work lamp/);
+  assert.match(await actions.first().textContent(), /Rejected, later corrected/);
+  assert.match(await actions.last().textContent(), /Corrected/);
   const executionSummary = restoredConversation.locator('.prompt-attempt').last().locator('.prompt-task-summary');
   assert.match(await executionSummary.textContent(), /Queue time1 sec/);
   assert.match(await executionSummary.textContent(), /Execution time3 sec/);
@@ -453,6 +505,46 @@ test('six workbench views preserve conversation, canvas and project isolation an
   assert.equal(await page.locator('.canvas-connections path').count(), persisted.edges.length);
   await fit.click();
   await page.screenshot({ animations: 'disabled', path: '/tmp/dreamatic-solution-editor.png' });
+  await connect(page.locator('.canvas-media:not(.canvas-solution)').filter({ hasText: 'Design image' }).first());
+  const materialCard = page.locator('.canvas-material-prompt').last();
+  assert.equal(await materialCard.locator('textarea').count(), 0);
+  await materialCard.getByRole('button', { name: 'Replace material', exact: true }).click();
+  const generate = materialCard.getByRole('button', { name: 'Generate new version', exact: true });
+  assert.equal(await generate.isDisabled(), true);
+  await materialCard.getByRole('button', { name: 'design (design)', exact: true }).click();
+  await generate.click();
+  await cards.filter({ hasText: 'Material revision' }).waitFor({ state: 'attached' });
+  assert.deepEqual(solutionTasks.at(-1).materialEdit, { mode: 'replace', fileIds: ['artifacts/design.png'], targetId: 'design' });
+  assert.equal(solutionTasks.at(-1).prompt, '');
+  const firstVersion = library.locator('article').filter({ has: page.locator('strong').filter({ hasText: /^First study$/ }) });
+  const secondVersion = library.locator('article').filter({ has: page.locator('strong').filter({ hasText: /^Second study$/ }) });
+  await firstVersion.getByRole('button', { name: 'Set as final' }).click();
+  await cards.filter({ hasText: 'First study' }).getByText('Final solution', { exact: true }).waitFor();
+  await secondVersion.getByRole('button', { name: 'Preview' }).click();
+  const frame = page.frameLocator('.showcase-view iframe');
+  await frame.getByRole('heading', { name: 'Second study' }).waitFor();
+  await frame.locator('img[alt="Version image"]').evaluate(async image => { await image.decode(); });
+  const publish = page.locator('.preview-actions').getByRole('button', { name: 'Publish', exact: true });
+  assert.equal(await publish.isDisabled(), true);
+  await nav('Preview').click();
+  await frame.getByRole('heading', { name: 'First study' }).waitFor();
+  await nav('Solution editor').click();
+  await fit.click();
+  await cards.filter({ hasText: 'Second study' }).getByRole('button', { name: 'Set as final' }).click();
+  await secondVersion.getByText('Final solution', { exact: true }).waitFor();
+  await page.reload();
+  await page.locator('.project-select').filter({ hasText: 'Project A' }).click();
+  await nav('Preview').click();
+  await frame.getByRole('heading', { name: 'Second study' }).waitFor();
+  await publish.click();
+  const finalDialog = page.getByRole('dialog', { name: 'Publish to DreamaticSite' });
+  await finalDialog.getByText('Second study', { exact: true }).waitFor();
+  await finalDialog.getByRole('checkbox').check();
+  await finalDialog.getByRole('button', { name: 'Confirm & Publish' }).click();
+  await finalDialog.getByRole('link', { name: 'Open published design' }).waitFor();
+  assert.equal(publications[0].versionId, initialVersions[1].id);
+  await finalDialog.getByRole('button', { name: 'Done' }).click();
+  await nav('Solution editor').click();
   await page.setViewportSize({ width: 390, height: 844 });
   const versionList = page.locator('.solution-list-scroll');
   assert.equal(await versionList.evaluate(node => node.scrollWidth > node.clientWidth), false);

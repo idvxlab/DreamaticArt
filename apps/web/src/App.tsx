@@ -5,7 +5,7 @@ import { Upload, Grid2X2, PanelLeftClose, PanelLeftOpen, PanelLeft, RefreshCw, L
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { abortSession, createSession, deleteRun, getHealth, getRuntimeConfig, openProjectAssets, getWorkflow, getRun, listRunAssets, listAssets, listRuns, listSessions, renameRun, saveRuntimeConfig, streamPrompt, streamWorkflow, type HealthView, type PromptEvent, type RuntimeConfig } from "./api";
 import { AgentPanel, type PendingImage } from "./components/AgentPanel";
-import { listSolutionVersions, type SolutionVersion } from './api';
+import { getFinalSolution, listSolutionVersions, selectFinalSolution, type SolutionVersion } from './api';
 import { SolutionVersions } from './components/SolutionVersions';
 import { Canvas } from "./components/Canvas";
 import { Showcase } from "./components/Showcase";
@@ -87,6 +87,7 @@ export function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<WorkbenchView>('overview');
   const [previewEntry, setPreviewEntry] = useState<string>();
+  const [previewSolution, setPreviewSolution] = useState<SolutionVersion>();
   const [fileSelection, setFileSelection] = useState<{ runId?: string; items: Partial<Record<WorkbenchView, string>> }>({ items: {} });
   const toolVisible = view === 'preview' ? previewPanelOpen : panelOpen;
   const setToolOpen = (open: boolean) => view === 'preview' ? setPreviewPanelOpen(open) : setPanelOpen(open);
@@ -110,13 +111,40 @@ export function App() {
   const active = useMemo(() => sessions.find((session) => session.id === activeId), [sessions, activeId]);
   const activeRun = useMemo(() => runs.find((run) => run.id === activeRunId), [runs, activeRunId]);
   const publication = usePublication(activeRun?.id);
-  const publicationLabel = !activeRun ? "No project" : publication.error ? "Publication status unavailable" : !publication.status ? "Checking publication…" : publication.status.inProgress ? "Publishing…" : publication.status.published ? "Published" : publication.status.mayExist ? "Publication unconfirmed" : "Not published";
   const agentRunning = Boolean(activeId && runningSessions.has(activeId)) || Boolean(active?.running);
   const projectFiles = useProjectFiles(activeRunId, agentRunning);
   const [canvasAdd, setCanvasAdd] = useState<{ runId: string; fileId: string; nonce: string }>();
   const [solutionAdd, setSolutionAdd] = useState<{ runId: string; versionId: string; nonce: string }>();
   const [editorLibrary, setEditorLibrary] = useState<'versions' | 'assets'>('versions');
   const [versionState, setVersionState] = useState<{ runId?: string; versions: SolutionVersion[]; loading?: boolean; error?: boolean }>({ versions: [] });
+  const [finalState, setFinalState] = useState<{ runId: string; versionId?: string | null; saving?: boolean; error?: string }>();
+  const finalRequest = useRef(0);
+  const finalSolution = finalState?.runId === activeRunId ? finalState : undefined;
+  const publicationLabel = !activeRun ? "No project" : publication.error ? "Publication status unavailable" : !publication.status ? "Checking publication…" : publication.status.inProgress ? "Publishing…" : publication.status.published ? (finalSolution?.versionId !== undefined && (publication.status.versionId ?? null) !== finalSolution.versionId ? "Another version is published" : "Published") : publication.status.mayExist ? "Publication unconfirmed" : "Not published";
+  const refreshFinalSolution = useCallback(() => {
+    if (!activeRunId) return;
+    const request = ++finalRequest.current;
+    void getFinalSolution(activeRunId).then(({ versionId }) => {
+      if (request === finalRequest.current) setFinalState({ runId: activeRunId, versionId });
+    }).catch(error => {
+      if (request === finalRequest.current) setFinalState({ runId: activeRunId, error: error.message });
+    });
+  }, [activeRunId]);
+  async function chooseFinalSolution(version: SolutionVersion) {
+    if (!activeRunId || version.runId !== activeRunId || finalSolution?.saving) return;
+    const request = ++finalRequest.current;
+    setFinalState({ runId: activeRunId, versionId: finalSolution?.versionId, saving: true });
+    try {
+      const { versionId } = await selectFinalSolution(activeRunId, version.id);
+      if (request === finalRequest.current) setFinalState({ runId: activeRunId, versionId });
+    } catch (error) {
+      if (request === finalRequest.current) setFinalState({ runId: activeRunId, versionId: finalSolution?.versionId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  useEffect(() => {
+    refreshFinalSolution();
+    return () => { finalRequest.current++; };
+  }, [refreshFinalSolution]);
   const versionRequest = useRef(0);
   const refreshVersions = useCallback(() => {
     if (!activeRunId) return;
@@ -129,17 +157,25 @@ export function App() {
     });
   }, [activeRunId]);
   useEffect(() => {
-    if (view === 'canvas') refreshVersions();
+    if (view === 'canvas' || view === 'preview') refreshVersions();
     return () => { versionRequest.current++; };
   }, [view, refreshVersions, activeRun?.status]);
   const versions = versionState.runId === activeRunId ? versionState.versions : [];
+  const selectedSolution = versions.find(version => version.id === finalSolution?.versionId);
+  const previewVersion = previewSolution?.runId === activeRunId ? previewSolution : undefined;
+  function openSolutionPreview(version: SolutionVersion) {
+    setPreviewSolution(version);
+    setPreviewEntry(undefined);
+    setPreviewPanelOpen(false);
+    setView('preview');
+  }
   useEffect(() => { setCanvasAdd(undefined); setSolutionAdd(undefined); setEditorLibrary('versions'); }, [activeRunId]);
   const sectionFiles = projectFiles.files.filter(file => file.category === (view === 'canvas' ? 'assets' : view) && (view !== 'canvas' || mediaKind(file)));
   const selectedFileId = fileSelection.runId === activeRunId ? fileSelection.items[view] : undefined;
   const documentFile = sectionFiles.find(file => file.id === selectedFileId) ?? sectionFiles[0];
   function navigate(next: WorkbenchView, file?: ProjectFile) {
     setView(next); setNavigationOpen(false);
-    if (next === 'preview') { setPreviewEntry(undefined); if (view !== 'preview') setPreviewPanelOpen(false); }
+    if (next === 'preview') { if (!finalSolution?.saving) refreshFinalSolution(); setPreviewEntry(undefined); setPreviewSolution(undefined); if (view !== 'preview') setPreviewPanelOpen(false); }
     if (window.matchMedia('(max-width: 900px)').matches && file) setPanelOpen(false);
     if (file) setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), [next]: file.id } }));
   }
@@ -273,7 +309,7 @@ export function App() {
       if (epoch !== selectionEpoch.current) return;
       selectionEpoch.current += 1;
       activateSelection({ runId: session.projectId, sessionId: session.id });
-      setView("overview"); setPanelOpen(true); setPreviewEntry(undefined); setFileSelection({ items: {} });
+      setView("overview"); setPanelOpen(true); setPreviewEntry(undefined); setPreviewSolution(undefined); setFileSelection({ items: {} });
       setWorkflow([]);
       setTimeline([]);
       resetStreamingText();
@@ -304,7 +340,7 @@ export function App() {
       setNavigationOpen(false);
       return;
     }
-    setPreviewEntry(undefined); setFileSelection({ items: {} });
+    setPreviewEntry(undefined); setPreviewSolution(undefined); setFileSelection({ items: {} });
     const epoch = ++selectionEpoch.current;
     setWorkflow([]);
     setTimeline([]);
@@ -543,8 +579,12 @@ export function App() {
         </header>
         <div className="workspace-content">
           {view === "overview" && <ProjectOverview run={activeRun} workflow={workflow} assets={visibleAssets} files={projectFiles.files} running={agentRunning} pending={pendingAgentStatus} onNavigate={navigate} />}
-          <div className="canvas-container" hidden={view !== "canvas"}><Canvas versions={versions} solutionAdd={solutionAdd?.runId === activeRunId ? solutionAdd : undefined} onVersionsChanged={refreshVersions} onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={projectFiles.files} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
-          {view === "preview" && <Showcase key={activeRunId ?? "empty"} run={activeRun} entry={previewEntry} />}
+          <div className="canvas-container" hidden={view !== "canvas"}><Canvas versions={versions} finalVersionId={finalSolution?.versionId} selectingFinal={finalSolution?.saving} onSelectFinal={chooseFinalSolution} onPreviewSolution={openSolutionPreview} solutionAdd={solutionAdd?.runId === activeRunId ? solutionAdd : undefined} onVersionsChanged={refreshVersions} onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={projectFiles.files} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewSolution(undefined); setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
+          {view === "preview" && <Showcase key={activeRunId ?? "empty"} run={activeRun} entry={previewEntry}
+            version={previewVersion ?? (previewEntry ? undefined : selectedSolution)} finalVersionId={finalSolution?.versionId}
+            selectionError={finalSolution?.error} selectingFinal={finalSolution?.saving}
+            versionUnavailable={Boolean(finalSolution?.versionId && !selectedSolution && (versionState.error || (!versionState.loading && versionState.runId === activeRunId)))}
+            onSelectFinal={chooseFinalSolution} onRetrySelection={() => { refreshFinalSolution(); refreshVersions(); }} />}
           {!conversationView && view !== "canvas" && <DocumentViewer runId={activeRunId} file={documentFile} />}
         </div>
 
@@ -555,9 +595,9 @@ export function App() {
         <button aria-pressed={editorLibrary === 'versions'} onClick={() => setEditorLibrary('versions')}><Layers3 size={16} aria-hidden="true" />{t('Versions')}</button>
         <button aria-pressed={editorLibrary === 'assets'} onClick={() => setEditorLibrary('assets')}><Images size={16} aria-hidden="true" />{t('Assets')}</button>
       </div>}
-      {view === 'canvas' && editorLibrary === 'versions' && <SolutionVersions versions={versions}
+      {view === 'canvas' && editorLibrary === 'versions' && <SolutionVersions versions={versions} finalVersionId={finalSolution?.versionId} selectingFinal={finalSolution?.saving} selectionError={finalSolution?.error} onSelectFinal={chooseFinalSolution} onPreview={openSolutionPreview}
         loading={Boolean(activeRunId && (versionState.runId !== activeRunId || versionState.loading))} error={Boolean(versionState.runId === activeRunId && versionState.error)}
-        onRetry={refreshVersions} onAdd={version => {
+        onRetry={() => { refreshVersions(); if (!finalSolution?.saving) refreshFinalSolution(); }} onAdd={version => {
           setSolutionAdd({ runId: version.runId, versionId: version.id, nonce: crypto.randomUUID() });
           if (toolPanel.viewportWidth <= 900) setPanelOpen(false);
         }} />}

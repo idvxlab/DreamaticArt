@@ -22,7 +22,7 @@ function Fixture(){
  window.setRun=setRun;
  React.useEffect(()=>setOpen(false),[run.id,run.presentation?.entry,run.presentation?.mode,run.stages.build]);
  const available=run.presentation?.mode==='html'?run.stages.build==='completed':Boolean(run.showcasePath);
- return React.createElement(React.Fragment,null,React.createElement('nav',{className:'canvas-view-switch'},React.createElement('button',{onClick:()=>setOpen(false)},'Canvas'),React.createElement('button',{disabled:!available,onClick:()=>{setOpen(true);setRevision(n=>n+1)}},'Preview')),open&&React.createElement(Showcase,{key:revision,run}));
+ return React.createElement(React.Fragment,null,React.createElement('nav',{className:'canvas-view-switch'},React.createElement('button',{onClick:()=>setOpen(false)},'Canvas'),React.createElement('button',{disabled:!available,onClick:()=>{setOpen(true);setRevision(n=>n+1)}},'Preview')),open&&React.createElement(Showcase,{key:revision,run,finalVersionId:null}));
 }
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));`;
     } }], build: { write: false, rollupOptions: { input: entry }, minify: false } });

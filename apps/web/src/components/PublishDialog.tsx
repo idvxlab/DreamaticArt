@@ -4,7 +4,7 @@ import { LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { publishProject, type PublishProgress, type PublishCreator } from "../api";
 
-export function PublishDialog({ runId, title, onClose }: { runId: string; title: string; onClose: () => void }) {
+export function PublishDialog({ runId, title, versionId, onClose }: { runId: string; title: string; versionId: string | null; onClose: () => void }) {
   const { t } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const submitting = useRef(false);
@@ -43,7 +43,7 @@ export function PublishDialog({ runId, title, onClose }: { runId: string; title:
     submitting.current = true; setPublishing(true); setError(undefined); setProgress({ phase: "packaging", uploadedBytes: 0, totalBytes: 0 });
     setPublicationPosting(runId, true);
     let continues = false;
-    try { setResult(await publishProject(runId, creator, status.mayExist)); }
+    try { setResult(await publishProject(runId, creator, status.mayExist, versionId)); }
     catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setConfirmed(false);
@@ -59,7 +59,7 @@ export function PublishDialog({ runId, title, onClose }: { runId: string; title:
       {result ? <div role="status"><p>“{title}{t("” has been published.")}</p><a href={result.previewUrl} target="_blank" rel="noreferrer">{t("Open published design")}</a><a href={result.galleryUrl} target="_blank" rel="noreferrer">{t("View Gallery")}</a></div> : <>
         <p><strong>{title}</strong></p><p>{t("Destination:")} {status?.site ?? t("Loading…")}</p>
         {status?.mayExist && <p className="publish-overwrite" role="note">{t(status.published ? "This project has already been published. Publishing again will replace its previous contents at the same website address." : "A previous publication attempt exists. If it reached the website, publishing again will replace that version.")}</p>}
-        <p>{t("The complete project export, including design outputs, source files and reference materials, will be uploaded. Design assets will be publicly viewable in Gallery. Sessions and system credentials are excluded.")}</p>
+        <p>{t(versionId ? "The selected showcase, its media and design documents will be uploaded. The showcase and media will be publicly viewable in Gallery." : "The complete project export, including design outputs, source files and reference materials, will be uploaded. Design assets will be publicly viewable in Gallery. Sessions and system credentials are excluded.")}</p>
         <fieldset disabled={publishing}><legend>{t("Creator · optional")}</legend>
           <label>{t("Name")}<input autoComplete="name" maxLength={80} value={creator.name} onChange={event => setCreator({ ...creator, name: event.target.value })} /></label>
           <label>{t("Organization")}<input autoComplete="organization" maxLength={160} value={creator.affiliation} onChange={event => setCreator({ ...creator, affiliation: event.target.value })} /></label>
@@ -69,7 +69,7 @@ export function PublishDialog({ runId, title, onClose }: { runId: string; title:
         <label className="publish-consent"><input type="checkbox" disabled={publishing || !status} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{t(status?.mayExist ? "I confirm publication and replacement of this project's previous published contents." : "I confirm that I want to publish this project and may publicly share its contents.")}</label>
       </>}
       {publishing && <section className="publish-progress" role="status" aria-live="polite"><span><LoaderCircle size={15} className="spin" />{t(label)}{phase === "uploading" ? ` ${percent}%` : ""}</span><progress aria-label={t("Publication progress")} max={100} value={phase === "packaging" ? undefined : percent} /><small>{t("Please wait. Keep this window open until publication finishes.")}</small></section>}
-      {(error || publication.error) && <p role="alert">{error || publication.error}</p>}
+      {(error || publication.error) && <p role="alert">{t(error || publication.error!)}</p>}
       {!status && publication.error && <button type="button" onClick={() => void publication.refresh()}>{t("Retry")}</button>}
       <footer><button type="button" disabled={publishing} onClick={onClose}>{result ? t("Done") : t("Cancel")}</button>{!result && <button type="submit" className="primary" disabled={!confirmed || publishing || !status}>{publishing ? t("Publishing…") : t(status?.mayExist ? "Confirm & Replace" : "Confirm & Publish")}</button>}</footer>
     </form>

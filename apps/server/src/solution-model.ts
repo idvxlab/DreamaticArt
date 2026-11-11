@@ -3,7 +3,7 @@ import { modelActivityUsage, type EditActivityReporter } from './edit-activity.j
 import { setting } from './design-pipeline.js';
 import { createModelResponseTimer } from './model-response-timer.js';
 
-export async function promptSolutionModel(agent: Awaited<ReturnType<typeof createDreamaticAgent>>, text: string, signal: AbortSignal, role: 'editor' | 'builder', report?: EditActivityReporter, recovery?: { shouldStop: () => boolean; retryIf: () => boolean; retryMessage: () => string }) {
+export async function promptSolutionModel(agent: Awaited<ReturnType<typeof createDreamaticAgent>>, text: string, signal: AbortSignal, role: 'editor' | 'builder', report?: EditActivityReporter, recovery?: { shouldStop: () => boolean; retryIf: () => boolean; retryMessage: () => string; failureMessage?: () => string }) {
   const { session, prompt } = agent;
   const abort = () => { void session.abort(); };
   const timer = createModelResponseTimer({
@@ -20,7 +20,12 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
       const failed = event.message.stopReason === 'error' || event.message.stopReason === 'aborted';
       report?.({ actor: role, label: 'Model response', state: failed ? 'failed' : 'completed' }, modelActivityUsage(event.message.usage));
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
-      report?.({ actor: role, label: event.toolName, state: event.type === 'tool_execution_start' ? 'started' : event.isError ? 'failed' : 'completed' });
+      const detail = event.type === 'tool_execution_end' && event.isError && event.toolName === 'plan_showcase'
+        ? event.result.content.find((block: { type: string; text?: string }) => block.type === 'text')?.text?.slice(0, 1800)
+        : undefined;
+      report?.({ actor: role, label: event.toolName, callId: event.toolCallId,
+        state: event.type === 'tool_execution_start' ? 'started' : event.isError ? 'failed' : 'completed',
+        ...(detail ? { detail } : {}) });
       if (event.type === 'tool_execution_end' && recovery?.shouldStop()) abort();
     }
   });
@@ -35,7 +40,9 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
       signal.throwIfAborted();
       if (timer.failure) throw new Error(`Model response timeout (${timer.failure})`);
     }
+    if (recovery?.failureMessage && recovery.shouldStop()) throw new Error(recovery.failureMessage());
     if (session.messages.some(message => message.role === 'assistant' && ['error', 'aborted'].includes(message.stopReason))) throw new Error('Solution model execution failed');
+    if (recovery?.failureMessage && recovery.retryIf()) throw new Error(recovery.failureMessage());
     report?.({ actor: role, label: 'Agent execution', state: 'completed' });
     return session.getLastAssistantText() || '';
   } catch (error) {

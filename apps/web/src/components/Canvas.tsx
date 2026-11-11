@@ -1,10 +1,11 @@
 import { PROMPT_MIN_SIZE, canvasConnectionIssue, normalizeCanvasEdges, validCanvasConnection } from '@dreamatic/project-data/canvas-graph';
 import { useCanvasHistory } from '../use-canvas-history';
-import { ExternalLink, Grid3X3, Grip, Hand, LayoutGrid, Minus, MousePointer2, Plus, Scan, Trash2, MessageSquarePlus, LoaderCircle, Undo2, Redo2, MessageSquareText, X } from 'lucide-react';
+import { ExternalLink, Flag, Grid3X3, Grip, Hand, LayoutGrid, Minus, MousePointer2, Plus, Scan, Trash2, MessageSquarePlus, LoaderCircle, Undo2, Redo2, MessageSquareText, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { getCanvasState, projectFileUrl, listEditorTasks, submitEditorTask, editorTaskAction, type EditorTask } from '../api';
 import { listSolutionTasks, solutionTaskAction, submitSolutionTask, solutionFileUrl, type SolutionTask, type SolutionVersion } from '../api';
+import { MaterialPrompt, materialTargets } from './MaterialPrompt';
 import { PromptComposer, PromptDialogue } from './PromptDialogue';
 import { promptCommand } from '../prompt-commands';
 import { SolutionPrompt, solutionPromptOptions } from './SolutionPrompt';
@@ -21,6 +22,10 @@ interface CanvasProps {
   addRequest?: { fileId: string; nonce: string };
   onSelectFile: (file: ProjectFile) => void;
   versions?: SolutionVersion[];
+  finalVersionId?: string | null;
+  selectingFinal?: boolean;
+  onSelectFinal: (version: SolutionVersion) => void;
+  onPreviewSolution: (version: SolutionVersion) => void;
   solutionAdd?: { versionId: string; nonce: string };
   onVersionsChanged?: () => void;
   onRenamed?: () => void;
@@ -39,7 +44,7 @@ function bounds(elements: CanvasElementState[]) {
   return { x, y, width: Math.max(1, ...elements.map(item => item.x + item.width - x)), height: Math.max(1, ...elements.map(item => item.y + item.height - y)) };
 }
 
-export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPreview, onRenamed, versions = [], solutionAdd, onVersionsChanged }: CanvasProps) {
+export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPreview, onRenamed, versions = [], solutionAdd, onVersionsChanged, finalVersionId, selectingFinal, onSelectFinal, onPreviewSolution }: CanvasProps) {
   const { t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const gesture = useRef<Gesture | undefined>(undefined);
@@ -324,7 +329,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
     });
   }
   function createPrompt() {
-    const inputs = elements.filter(node => selectedIds.includes(node.id) && (node.kind === 'image' || node.kind === 'solution'));
+    const inputs = elements.filter(node => selectedIds.includes(node.id) && (node.kind === 'image' || node.kind === 'video' || node.kind === 'solution'));
     const rect = viewport.current?.getBoundingClientRect(); if (!rect) return;
     const item: CanvasElementState = {
       id: crypto.randomUUID(), kind: 'prompt', text: '',
@@ -485,17 +490,19 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
         {elements.map(item => item.kind === 'group' ? <section key={item.id} data-element-id={item.id} className={`canvas-group-label role-${item.role ?? 'other'} ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height }} onPointerDown={event => beginElement(event, item)}><span>{t(item.text ?? '')}</span><small>{t('Run outputs')}</small></section>
           : (item.kind === 'image' || item.kind === 'video') && source(item) ? <figure key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-media ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height }} onPointerDown={event => beginElement(event, item)}>
             <div>{item.kind === 'video' ? <video src={source(item)} controls preload="metadata" onPointerDown={event => { event.stopPropagation(); choose(item, event.shiftKey); }} onLoadedMetadata={event => metadata(item, event.currentTarget.videoWidth, event.currentTarget.videoHeight, event.currentTarget)} onError={() => setNotice('This media could not be loaded. The original file may be missing or unsupported.')} /> : <img draggable={false} src={source(item)} alt={mediaFile(item)?.title ?? item.text ?? item.assetPath?.split('/').at(-1) ?? ''} onLoad={event => metadata(item, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight, event.currentTarget)} onError={() => setNotice('This media could not be loaded. The original file may be missing or unsupported.')} />}</div>
-            {item.kind === 'image' && ports(item)}
+            {ports(item)}
             <figcaption><span><strong>{mediaFile(item)?.title ?? item.text ?? item.assetPath?.split('/').at(-1)}</strong><small>{t(item.kind === 'video' ? 'Video file' : 'Image file')}</small></span>{run && mediaFile(item) && <MediaRename runId={run.id} file={mediaFile(item)!} onRenamed={onRenamed} onAddResult={file => add(file)} />}<a aria-label={t('Open asset')} href={source(item)} target="_blank" rel="noreferrer" onPointerDown={event => event.stopPropagation()}><ExternalLink size={13} /></a>{item.kind === 'image' && <button type="button" className="canvas-media-delete" aria-label={t('Remove image from canvas')} title={t('Remove image from canvas')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeElement(item.id); }}><Trash2 size={24} /></button>}</figcaption>
             {selectedIds.includes(item.id) && <button className="canvas-resize-handle" aria-label={t('Resize selected media')} onPointerDown={event => beginElement(event, item, true)} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); event.stopPropagation(); measured.current.delete(item.id); const factor = ['ArrowLeft', 'ArrowDown'].includes(event.key) ? .9 : 1.1; if (item.width * factor >= 120 && item.height * factor >= 100 && Math.max(item.width, item.height) * factor <= 2400) { setElements(current => current.map(entry => entry.id === item.id ? { ...entry, width: entry.width * factor, height: entry.height * factor } : entry)); setDirty(true); } }} />}
           </figure>
           : item.kind === 'solution' ? (() => {
             const version = versions.find(entry => entry.id === item.versionId);
+            const isFinal = Boolean(version && version.id === finalVersionId);
             return <figure key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-media canvas-solution ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height }} onPointerDown={event => beginElement(event, item)}>
               <div>{version && <img draggable={false} src={solutionFileUrl(version, version.coverPath)} alt="" />}</div>
               {ports(item)}
-              <figcaption><span><strong>{version?.title ?? item.text}</strong><small>{version ? `${version.images.length} ${t('Design images')}` : t('Version unavailable')}</small></span>
-                {version && <a href={solutionFileUrl(version, version.showcasePath)} target="_blank" rel="noreferrer" aria-label={t('Open showcase')}><ExternalLink size={15} /></a>}
+              <figcaption><span><strong>{version?.title ?? item.text}</strong><small>{isFinal ? t('Final solution') : version ? `${version.images.length} ${t('Design images')}` : t('Version unavailable')}</small></span>
+                {version && <><button type="button" disabled={isFinal || selectingFinal} aria-label={t(isFinal ? 'Final solution' : 'Set as final')} title={t(isFinal ? 'Final solution' : 'Set as final')} onPointerDown={event => event.stopPropagation()} onClick={() => onSelectFinal(version)}><Flag size={15} fill={isFinal ? 'currentColor' : 'none'} /></button>
+                  <button type="button" aria-label={t('Open showcase')} title={t('Preview')} onPointerDown={event => event.stopPropagation()} onClick={() => onPreviewSolution(version)}><ExternalLink size={15} /></button></>}
               </figcaption>
             </figure>;
           })()
@@ -503,7 +510,14 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
             const inputs = incoming(item);
             const imageInputs = inputs.filter(node => node.kind === 'image');
             const versionInputs = inputs.filter(node => node.kind === 'solution');
-            const mixed = imageInputs.length > 0 && versionInputs.length > 0;
+            const mediaInputs = inputs.filter(node => node.kind === 'image' || node.kind === 'video');
+            const mixed = mediaInputs.length > 0 && versionInputs.length > 0;
+            const materialFiles = [...new Map(mediaInputs.flatMap(node => {
+              const file = mediaFile(node);
+              return file ? [[file.id, file] as const] : [];
+            })).values()];
+            const invalidMaterial = materialFiles.length !== new Set(mediaInputs.map(node => node.fileId ?? mediaFile(node)?.id ?? node.id)).size ||
+              materialFiles.some(file => !/^(png|jpe?g|webp|gif|mp4|webm)$/iu.test(file.kind));
             const sources = solutionInputs(item);
             const missing = versionInputs.some(node => !sources.some(version => version.id === node.versionId));
             const inputFiles = [...new Set(imageInputs.flatMap(node => {
@@ -515,17 +529,40 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
             const imageTask = tasks.find(task => task.id === item.taskId) ?? tasks.find(task => task.promptNodeId === item.id && imageRunning(task.status));
             const solutionTask = solutionTasks.find(task => task.id === item.taskId) ?? solutionTasks.find(task => task.promptNodeId === item.id && (solutionRunning(task.status) || !item.taskId));
             const busy = submitting.current.has(item.id) || imageRunning(imageTask?.status) || solutionRunning(solutionTask?.status);
+            const materialVersion = mixed && sources.length === 1 && versionInputs.length === 1 ? sources[0] : undefined;
+            const materialMode = item.materialMode ?? 'integrate';
+            const materialTarget = materialVersion && materialTargets(materialVersion, materialFiles).find(target => target.id === item.materialTargetId);
+            const validSection = materialVersion?.works?.some(work => work.section === item.materialSection);
             const hasSolution = versionInputs.length > 0;
             const command = promptCommand(item.text ?? '');
             const commandError = command.error || (command.solutionOnly && !hasSolution ? 'This command needs a solution input.' :
               command.operation === 'replace' && !command.prompt ? 'Describe how to replace the selected image.' : undefined);
             const { canRun } = solutionPromptOptions(item, sources);
-            const canSend = !busy && !mixed && !missing && !commandError && Boolean(command.prompt) && (hasSolution ? canRun : inputFiles.length > 0);
+            const canSend = !busy && !missing && (mixed
+              ? Boolean(materialVersion && !invalidMaterial && materialFiles.length && materialFiles.length <= 8 && (materialMode === 'integrate' || materialTarget))
+              : !commandError && Boolean(command.prompt) && (hasSolution ? canRun : inputFiles.length > 0 && mediaInputs.length === imageInputs.length));
             const task = imageRunning(imageTask?.status) ? imageTask : solutionRunning(solutionTask?.status) ? solutionTask : imageTask ?? solutionTask;
             const transcript = [...tasks.filter(task => task.promptNodeId === item.id || task.id === item.taskId),
               ...solutionTasks.filter(task => task.promptNodeId === item.id || task.id === item.taskId)]
               .sort((first, second) => (first.createdAt ?? '').localeCompare(second.createdAt ?? ''));
-            const send = () => { if (hasSolution) void executeSolution(item); else void submitPrompt(item); };
+            const send = () => {
+              if (mixed && materialVersion) {
+                if (!run || !canSend || submitting.current.has(item.id)) return;
+                const id = crypto.randomUUID();
+                submitting.current.add(item.id);
+                updateSolutionPrompt(item, { taskId: id });
+                void submitSolutionTask(run.id, {
+                  id, parentIds: [materialVersion.id], prompt: '', operation: 'revise', outputCount: 1, sourceNotes: [''], promptNodeId: item.id,
+                  materialEdit: { mode: materialMode, fileIds: materialFiles.map(file => file.id),
+                    ...(materialMode === 'replace' && materialTarget ? { targetId: materialTarget.id } : {}),
+                    ...(materialMode === 'integrate' && validSection ? { section: item.materialSection } : {}) },
+                }).then(task => {
+                  setSolutionTasks(current => [...current.filter(entry => entry.id !== id), task]);
+                }).catch(error => setNotice(error instanceof Error ? error.message : 'Could not start solution edit.'))
+                  .finally(() => submitting.current.delete(item.id));
+              } else if (hasSolution) void executeSolution(item);
+              else void submitPrompt(item);
+            };
             const action = (value: 'retry' | 'cancel') => {
               if (task && 'parentIds' in task) void changeSolutionTask(task.id, value);
               else if (task) void taskAction(task.id, value);
@@ -533,26 +570,33 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
             const statusLabel = task && 'parentIds' in task && solutionRunning(task.status)
               ? task.status === 'waiting' ? 'Waiting for another solution edit' : task.phase === 'images' ? 'Preparing images' : task.phase === 'showcase' ? 'Composing showcase' : 'Planning revision'
               : task?.status ?? (busy ? 'submitted' : '');
-            return <article key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-prompt prompt-dialogue ${hasSolution ? 'canvas-solution-prompt' : ''} ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height, minWidth: PROMPT_MIN_SIZE.width, minHeight: PROMPT_MIN_SIZE.height }} onPointerDown={event => beginElement(event, item)}>
+            return <article key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-prompt prompt-dialogue ${hasSolution ? 'canvas-solution-prompt' : ''} ${mixed ? 'canvas-material-prompt' : ''} ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height, minWidth: PROMPT_MIN_SIZE.width, minHeight: PROMPT_MIN_SIZE.height }} onPointerDown={event => beginElement(event, item)}>
               {ports(item)}<header className="agent-header">
-                <div><span className="agent-sigil"><MessageSquareText size={15} aria-hidden="true" /></span><strong>{t('Prompt')}</strong></div>
+                <div><span className="agent-sigil"><MessageSquareText size={15} aria-hidden="true" /></span><strong>{t(mixed ? 'Solution material editor' : 'Prompt')}</strong></div>
                 <button aria-label={t('Delete prompt')} onClick={() => removeElement(item.id)}><X size={15} /></button>
               </header>
               <PromptDialogue tasks={transcript} versions={versions} files={currentFiles} runId={run?.id} latestId={task?.id}>
                 {!inputs.length && <small>{t('Connect an image or solution to a prompt.')}</small>}
-                {mixed && <small role="status">{t('This edit has both images and solutions. Disconnect one input type to run it.')}</small>}
+                {mixed && <>
+                  {!materialVersion && <small role="status">{t('Connect one solution to edit its materials.')}</small>}
+                  {invalidMaterial && <small role="status">{t('Use PNG, JPEG, WebP, GIF, MP4 or WebM materials.')}</small>}
+                  {materialFiles.length > 8 && <small role="status">{t('Connect up to eight materials.')}</small>}
+                  <MaterialPrompt item={item} version={materialVersion} files={materialFiles} busy={busy} update={fields => updateSolutionPrompt(item, fields)} />
+                </>}
+                {!mixed && mediaInputs.length > imageInputs.length && <small role="status">{t('Connect a solution to use a video in its showcase.')}</small>}
                 {missing && <small role="status">{t('A connected solution version is unavailable.')}</small>}
-                {inputFiles.length > 0 && <small className="canvas-prompt-inputs" aria-label={t('Input images')}>{inputFiles.map((id, index) => <span key={id}>{t('Image')} {index + 1}: {currentFiles.find(file => file.id === id)?.title ?? id}</span>)}</small>}
-                {hasSolution && <SolutionPrompt item={item} sources={sources} busy={busy} update={fields => updateSolutionPrompt(item, fields)} moveInput={index => moveSolutionInput(item, index)} />}
+                {!mixed && inputFiles.length > 0 && <small className="canvas-prompt-inputs" aria-label={t('Input images')}>{inputFiles.map((id, index) => <span key={id}>{t('Image')} {index + 1}: {currentFiles.find(file => file.id === id)?.title ?? id}</span>)}</small>}
+                {hasSolution && !mixed && <SolutionPrompt item={item} sources={sources} busy={busy} update={fields => updateSolutionPrompt(item, fields)} moveInput={index => moveSolutionInput(item, index)} />}
               </PromptDialogue>
               <footer className="composer-wrap">
                 <div className="prompt-dialog-status">
                   <span role="status" data-task-status={task?.status ?? (busy ? 'submitted' : 'Ready')}>{busy && <LoaderCircle size={12} className="spin" aria-hidden="true" />}{t(statusLabel)}</span>
                   {task && !busy && ['failed', 'cancelled', 'interrupted'].includes(task.status) && <button onClick={() => action('retry')}>{t('Retry')}</button>}
                 </div>
-                {commandError && <small role="alert">{t(commandError)}</small>}
+                {!mixed && commandError && <small role="alert">{t(commandError)}</small>}
                 {task?.error && <small role="alert">{t(task.error)}</small>}
-                <PromptComposer value={item.text ?? ''} busy={busy} canSend={canSend} canStop={Boolean(task && (imageRunning(imageTask?.status) || solutionRunning(solutionTask?.status)))} label={hasSolution ? 'Run solution edit' : 'Generate edit'} update={text => updateSolutionPrompt(item, { text })} send={send} stop={() => action('cancel')} begin={() => history.begin()} end={() => history.end()} />
+                {mixed ? <button type="button" className="material-submit" disabled={busy ? !task : !canSend} onClick={busy ? () => action('cancel') : send}>{t(busy ? 'Cancel' : 'Generate new version')}</button> :
+                <PromptComposer value={item.text ?? ''} busy={busy} canSend={canSend} canStop={Boolean(task && (imageRunning(imageTask?.status) || solutionRunning(solutionTask?.status)))} label={hasSolution ? 'Run solution edit' : 'Generate edit'} update={text => updateSolutionPrompt(item, { text })} send={send} stop={() => action('cancel')} begin={() => history.begin()} end={() => history.end()} />}
               </footer>
               <button className="canvas-resize-handle" aria-label={t('Resize prompt')} onPointerDown={event => beginElement(event, item, true)} />
             </article>;

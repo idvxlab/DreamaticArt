@@ -181,6 +181,7 @@ test('missing or replaced optional roots do not break unrelated reads or expand 
   await writeFile(join(run, 'evidence.md'), 'Valid project evidence');
   const catalog = await catalogFor(run, 'designer', [optional]);
   const reader = createScopedSkillReadTool({ root: run, catalog, sessionId: () => 'isolation' });
+  assert.match((await reader.execute('named', { path: 'optional-method' })).content[0].text, /name: optional-method/);
   await rm(optional, { recursive: true });
   assert.match((await reader.execute('normal', { path: join(run, 'evidence.md') })).content[0].text, /Valid project evidence/);
   assert.match((await reader.execute('builtin', { path: catalog.entries.find(e => e.source === 'builtin').skill.filePath })).content[0].text, /---/);
@@ -200,6 +201,7 @@ test('only leading human directives select knowledge; explicit reads enforce rol
   const entry = catalog.entries.find(e => e.skill.name === 'explicit-method');
   const reader = createScopedSkillReadTool({ root: run, catalog, sessionId: () => 'explicit' });
   await assert.rejects(reader.execute('guess', { path: entry.skill.filePath }), /outside|explicit/);
+  await assert.rejects(reader.execute('named', { path: 'explicit-method' }), /outside|explicit/);
   assert.equal(await explicitSkillInstructions({ root: run, catalog, request: 'Do not select $explicit-method', sessionId: 'explicit' }), '');
   const instructions = await explicitSkillInstructions({ root: run, catalog, request: '$explicit-method design this', sessionId: 'explicit' });
   assert.match(instructions, /Evidence anchor/); assert.match(instructions, /End of knowledge/);

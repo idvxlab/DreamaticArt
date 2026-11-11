@@ -13,6 +13,7 @@ import { requestImage, retryImage } from './image-request.js';
 import { imageSlot } from './image-slots.js';
 import { imageActivityUsage, type EditActivityReporter } from './edit-activity.js';
 import { promptSolutionModel } from './solution-model.js';
+import { includeVersionVideos } from './solution-materials.js';
 import { composeSolutionShowcase } from './solution-showcase.js';
 import { readSolutionFile, type SolutionDelivery, type SolutionVersion } from './solution-versions.js';
 import type { GeneratedShowcaseImage } from './showcase.js';
@@ -229,9 +230,25 @@ export async function buildSolutionRevision(options: {
       await writeFile(join(outputRoot, path), bytes);
       generated[image.id] = { path, digest };
     }
+    const videoTitles: Record<string, string> = Object.create(null);
+    const carriedVideos = new Set<string>();
+    for (const parent of parents) {
+      for (const video of parent.videos ?? []) {
+        const digest = parent.files[video.path]!;
+        if (carriedVideos.has(digest)) continue;
+        carriedVideos.add(digest);
+        let id = video.id;
+        while (generated[id]) id += '-video';
+        const path = `artifacts/${id}-${digest.slice(0, 12)}${extname(video.path)}`;
+        const bytes = await read(parent, video.path);
+        await writeFile(join(outputRoot, path), bytes);
+        generated[id] = { path, digest, kind: 'video' };
+        videoTitles[id] = video.title;
+      }
+    }
     await progress('showcase', index);
     deliveries.push(await composeSolutionShowcase({
-      repoRoot, staging: outputRoot, signal, request, ...(options.report ? { report: options.report } : {}), designText: output.design, generated,
+      repoRoot, staging: outputRoot, signal, request, ...(options.report ? { report: options.report } : {}), designText: options.operation === 'recompose' ? output.design : includeVersionVideos(output.design, videoTitles), generated, videoTitles,
       previousExhibition: sources.map(({ exhibition }, ordinal) => `Source ${ordinal + 1}:\n${exhibition}`).join('\n\n'),
       ...(parents.length === 1 ? { previousHtml: await read(parents[0]!, parents[0]!.showcasePath) } : {}),
     }));

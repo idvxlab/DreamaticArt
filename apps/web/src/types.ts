@@ -143,6 +143,9 @@ export interface CanvasElementState {
   operation?: "revise" | "recompose" | "replace" | "fuse" | "split";
   outputCount?: number;
   replacement?: string;
+  materialMode?: "integrate" | "replace";
+  materialSection?: string;
+  materialTargetId?: string;
   sourceNotes?: Record<string, string>;
 }
 

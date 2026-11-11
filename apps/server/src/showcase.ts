@@ -5,8 +5,8 @@ import { createReadToolDefinition, type ToolDefinition, type ReadToolInput } fro
 import { physicalRunFile } from '@dreamatic/project-data';
 import { Type } from 'typebox';
 
-export interface ShowcaseImage { id: string; introduction: string; size: string; prompt: string }
-export interface GeneratedShowcaseImage { path: string; digest: string }
+export interface ShowcaseImage { kind?: 'image' | 'video'; id: string; introduction: string; size: string; prompt: string }
+export interface GeneratedShowcaseImage { kind?: 'image' | 'video'; path: string; digest: string }
 export interface ShowcaseWork { id: string; role: string; section: string; purpose: string }
 export interface ShowcaseDirection { heroId: string; works: ShowcaseWork[]; markdown: string }
 
@@ -33,9 +33,22 @@ export function validateShowcaseDirection(value: unknown, images: Pick<ShowcaseI
   if (images.some(image => !generated[image.id])) throw new Error('Generate all planned works before planning the exhibition');
   const planned = new Set(images.map(image => image.id));
   const ids = direction.works.map(work => work?.id);
-  if (new Set(ids).size !== ids.length) throw new Error('Exhibition works must have distinct ids');
-  for (const id of ids) if (!planned.has(id)) throw new Error(`Unknown planned work: ${id}`);
-  for (const id of planned) if (!ids.includes(id)) throw new Error(`Every planned work must be arranged in the exhibition: ${id}`);
+  const submitted = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== 'string' || !id.trim()) throw new Error('Every exhibition work must provide a valid ID.');
+    if (submitted.has(id)) duplicates.add(id);
+    submitted.add(id);
+  }
+  const unknown = [...submitted].filter(id => !planned.has(id));
+  const missing = [...planned].filter(id => !submitted.has(id));
+  const issues = [
+    ...(duplicates.size ? [`Exhibition works must have distinct ids. Duplicates: ${[...duplicates].join(', ')}.`] : []),
+    ...(unknown.length ? [`Unknown planned work: ${unknown.join(', ')}.`] : []),
+    ...(missing.length ? [`Every planned work must be arranged in the exhibition. Missing: ${missing.join(', ')}.`] : []),
+  ];
+  if (issues.length) throw new Error(issues.join(' '));
+  if (generated[direction.heroId]?.kind === 'video') throw new Error('Select an image as the showcase cover');
   if (!ids.includes(direction.heroId)) throw new Error('The hero must be included in the planned works');
   if (direction.works.some(work => !work || [work.role, work.section, work.purpose].some(value => typeof value !== 'string' || !value.trim()))) throw new Error('Provide a role, section and purpose for every work');
   return { heroId: direction.heroId, markdown: direction.markdown.trim(), works: direction.works.map(work => ({ id: work.id, role: work.role.trim(), section: work.section.trim(), purpose: work.purpose.trim() })) };
@@ -46,7 +59,8 @@ export async function verifyShowcaseAssets(root: string, direction: ShowcaseDire
   if (new Set(paths).size !== paths.length) throw new Error('Ambiguous generated image source');
   for (const work of direction.works) {
     const image = generated[work.id];
-    if (!image || !/^artifacts\/[a-zA-Z0-9_-]+\.(png|jpe?g|webp|gif)$/i.test(image.path)) throw new Error(`Invalid generated asset: ${work.id}`);
+    const allowedPath = image?.kind === 'video' ? /^artifacts\/[a-zA-Z0-9_-]+\.(mp4|webm)$/iu : /^artifacts\/[a-zA-Z0-9_-]+\.(png|jpe?g|webp|gif)$/iu;
+    if (!image || !allowedPath.test(image.path)) throw new Error(`Invalid generated asset: ${work.id}`);
     const bytes = await readFile(await physicalRunFile(root, image.path));
     if (createHash('sha256').update(bytes).digest('hex') !== image.digest) throw new Error(`Generated image has changed: ${work.id}`);
   }
@@ -93,9 +107,10 @@ export async function resolveShowcaseImages(root: string, html: string, directio
     if (repaired) repairs.push({ id, from: src, to: target });
     return target;
   };
-  const rewritten = html.replace(/<!--[\s\S]*?-->|<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1>|<(?:img|a|source)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, tag => {
-    if (!/^<(img|a|source)\b/i.test(tag)) return tag;
+  const rewritten = html.replace(/<!--[\s\S]*?-->|<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1>|<(?:img|video|a|source)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, tag => {
+    if (!/^<(img|video|a|source)\b/i.test(tag)) return tag;
     const image = /^<img\b/i.test(tag);
+    const video = /^<video\b/i.test(tag);
     const attributes = /(\s+)([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
     const attrs = [...tag.matchAll(attributes)].filter(attr => ['src', 'href', 'srcset', 'data-image-id'].includes(attr[2]!.toLowerCase()));
     const values = new Map<string, string>();
@@ -108,7 +123,7 @@ export async function resolveShowcaseImages(root: string, html: string, directio
     return tag.replace(attributes, (attribute, space: string, name: string, double: string | undefined, single: string | undefined, bare: string | undefined) => {
       if (!['src', 'href'].includes(name.toLowerCase())) return attribute;
       const src = double ?? single ?? bare ?? '';
-      if (!(image && name.toLowerCase() === 'src') && !src.startsWith('dreamatic-image:') && !/^\.\.\/artifacts\/[^/]+\.(png|jpe?g|webp|gif)$/i.test(src)) return attribute;
+      if (!((image || video) && name.toLowerCase() === 'src') && !src.startsWith('dreamatic-image:') && !/^\.\.\/artifacts\/[^/]+\.(png|jpe?g|webp|gif)$/i.test(src)) return attribute;
       return `${space}${name}="${resolve(src, image ? values.get('data-image-id') : undefined)}"`;
     });
   });
@@ -122,18 +137,25 @@ export function createShowcaseTools(options: {
   generated: Record<string, GeneratedShowcaseImage>;
   saveDirection: (direction: ShowcaseDirection) => Promise<void>;
   initialDirection?: ShowcaseDirection;
+  onRejected?: (error: unknown) => void;
 }) {
   let direction = options.initialDirection ? validateShowcaseDirection(options.initialDirection, options.images, options.generated) : undefined;
   const tools: ToolDefinition[] = [{
     name: 'plan_showcase', label: 'Art direct the exhibition',
-    description: 'Required before HTML. After generating all planned images, use design.md and each image Introduction, Prompt and Size (no image reading) to record an independent project-specific exhibition direction. Assign EVERY planned image a role, section/group and communication purpose, in narrative order. No omissions or duplicate ids. Include concept thesis, necessary explanation/references, typography/palette/spacing and mobile sequence in direction. Preserve full image proportions; do not invent observed details.',
+    description: 'Required before HTML. After generating all planned images, use design.md and each image Introduction, Prompt and Size (no image reading) to record an independent project-specific exhibition direction. Assign EVERY planned work a role, section/group and communication purpose, in narrative order. No omissions or duplicate ids. Include concept thesis, necessary explanation/references, typography/palette/spacing and mobile sequence in direction. Preserve full image proportions; do not invent observed details.',
     parameters: Type.Object({ heroId: Type.String(), works: Type.Array(Type.Object({ id: Type.String(), role: Type.String({ minLength: 1 }), section: Type.String({ minLength: 1 }), purpose: Type.String({ minLength: 1 }) }), { minItems: 1 }), direction: Type.String({ minLength: 1 }) }),
     async execute(_callId, raw) {
       const params = raw as { heroId: string; works: ShowcaseWork[]; direction: string };
-      const next = validateShowcaseDirection({ heroId: params.heroId, works: params.works, markdown: params.direction }, options.images, options.generated);
-      await options.saveDirection(next);
-      direction = next;
-      return { content: [{ type: 'text', text: `Exhibition direction saved. Compose the complete HTML following this narrative arrangement. Use stable sources exactly as listed (for example <img src="${showcaseImageSource(next.heroId)}">); Dreamatic binds them to verified files. Never invent or copy hash filenames. Every work must be visibly exhibited using a normal img, not only a background, hidden node or tiny thumbnail:\n${next.works.map(work => `${work.id}: ${showcaseImageSource(work.id)} | ${work.role} | ${work.section} | ${work.purpose}`).join('\n')}\nHero: ${params.heroId}. Preserve a full, undistorted view of every work. No image reading, scripts or external resources are needed.` }], details: {} };
+      let next: ShowcaseDirection;
+      try {
+        next = validateShowcaseDirection({ heroId: params.heroId, works: params.works, markdown: params.direction }, options.images, options.generated);
+        await options.saveDirection(next);
+        direction = next;
+      } catch (error) {
+        options.onRejected?.(error);
+        throw error;
+      }
+      return { content: [{ type: 'text', text: `Exhibition direction saved. Compose the complete HTML following this narrative arrangement. Use stable sources exactly as listed (for example <img src="${showcaseImageSource(next.heroId)}">); Dreamatic binds them to verified files. Never invent or copy hash filenames. Every work must be visible. Use img for images and video with controls and a direct src for videos. No hidden or tiny elements:\n${next.works.map(work => `${work.id}: ${showcaseImageSource(work.id)} | ${options.generated[work.id]?.kind ?? 'image'} | ${work.role} | ${work.section} | ${work.purpose}`).join('\n')}\nHero: ${params.heroId}. Preserve a full, undistorted view of every work. No image reading, scripts or external resources are needed.` }], details: {} };
     }
   }];
   return { tools, get direction() { return direction; } };
@@ -177,7 +199,7 @@ export function normalizeShowcaseHtml(output: string): string {
 
 /** Static visibility checks for explicit hiding, inactive containers and tiny placeholders.
  * This is deliberately not a CSS layout engine or an aesthetic score. */
-function visibleImageSources(html: string): string[] {
+function visibleMediaSources(html: string) {
   const clean = html.replace(/<!--[\s\S]*?-->/g, '');
   // Only unconditional simple selectors are evaluated; responsive layout remains free.
   const rules: { selector: string; declarations: string }[] = [];
@@ -199,7 +221,7 @@ function visibleImageSources(html: string): string[] {
   }
   const stripped = clean.replace(/<(style|script|textarea|title)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
   const stack: { tag: string; hidden: boolean; id: string; classes: string[] }[] = [];
-  const sources: string[] = [];
+  const sources: Array<{ src: string; kind: 'image' | 'video' }> = [];
   for (const token of stripped.matchAll(/<\/?([a-z][\w:-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
     const tag = token[1]!.toLowerCase(), markup = token[0];
     if (markup.startsWith('</')) { const index = stack.map(node => node.tag).lastIndexOf(tag); if (index >= 0) stack.length = index; continue; }
@@ -211,8 +233,10 @@ function visibleImageSources(html: string): string[] {
     const properties = new Map<string, string>();
     for (const declaration of declarations.split(';')) { const colon = declaration.indexOf(':'); if (colon > 0) properties.set(declaration.slice(0, colon).trim().toLowerCase(), declaration.slice(colon + 1).replace(/!important\s*$/i, '').trim().toLowerCase()); }
     const tiny = (value: string | undefined) => value !== undefined && /^(?:0(?:\.\d+)?|1(?:\.0+)?)(?:px)?$/.test(value);
-    node.hidden = stack.some(parent => parent.hidden) || ['head', 'template', 'noscript'].includes(tag) || (tag === 'details' && !('open' in attrs)) || ('hidden' in attrs) || attrs['aria-hidden'] === 'true' || properties.get('display') === 'none' || ['hidden', 'collapse'].includes(properties.get('visibility') || '') || Number(properties.get('opacity') ?? 1) === 0 || properties.get('content-visibility') === 'hidden' || ['width', 'height', 'max-width', 'max-height'].some(key => tiny(properties.get(key))) || (tag === 'img' && (tiny(attrs.width) || tiny(attrs.height)));
-    if (tag === 'img' && attrs.src && !node.hidden) sources.push(attrs.src);
+    node.hidden = stack.some(parent => parent.hidden) || ['head', 'template', 'noscript'].includes(tag) || (tag === 'details' && !('open' in attrs)) || ('hidden' in attrs) || attrs['aria-hidden'] === 'true' || properties.get('display') === 'none' || ['hidden', 'collapse'].includes(properties.get('visibility') || '') || Number(properties.get('opacity') ?? 1) === 0 || properties.get('content-visibility') === 'hidden' || ['width', 'height', 'max-width', 'max-height'].some(key => tiny(properties.get(key))) || (['img', 'video'].includes(tag) && (tiny(attrs.width) || tiny(attrs.height)));
+    if (attrs.src && !node.hidden && (tag === 'img' || (tag === 'video' && 'controls' in attrs))) {
+      sources.push({ src: attrs.src, kind: tag === 'video' ? 'video' : 'image' });
+    }
     if (!['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'].includes(tag) && !markup.endsWith('/>')) stack.push(node);
   }
   return sources;
@@ -220,12 +244,13 @@ function visibleImageSources(html: string): string[] {
 
 /** Objective delivery checks only; aesthetic judgments belong to the Builder and the reviewer. */
 export async function validateShowcaseHtml(root: string, html: string, direction: { works: Array<Pick<ShowcaseWork, 'id'>> }, generated: Record<string, GeneratedShowcaseImage>): Promise<string[]> {
-  const sources = visibleImageSources(html);
+  const sources = visibleMediaSources(html);
   const paths = new Map(Object.entries(generated).map(([id, image]) => [`../${image.path}`, id]));
   const shown = new Set<string>();
-  for (const src of sources) {
+  for (const { src, kind } of sources) {
     const id = paths.get(src);
     if (!id) throw new Error(`Exhibition image must use its generated page source: ${src}`);
+    if ((generated[id]?.kind ?? 'image') !== kind) throw new Error(`Wrong HTML media element for ${id}`);
     if (!direction.works.some(work => work.id === id)) throw new Error(`Add ${id} to the exhibition direction before displaying it`);
     await readFile(await physicalRunFile(root, generated[id]!.path));
     shown.add(id);
@@ -262,7 +287,8 @@ export function validateVersionShowcaseResources(html: string, generated: Record
   const markup = page.replace(/<(style|textarea|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
   for (const tag of markup.matchAll(/<([a-z][\w:-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
     const name = tag[1]!.toLowerCase();
-    if (['base', 'script', 'link', 'iframe', 'object', 'embed', 'form', 'video', 'audio', 'foreignobject', 'animate', 'animatetransform', 'set'].includes(name)) throw new Error(`Unsupported resource element in a static showcase: ${name}`);
+    if (['base', 'script', 'link', 'iframe', 'object', 'embed', 'form', 'audio', 'foreignobject', 'animate', 'animatetransform', 'set'].includes(name)) throw new Error(`Unsupported resource element in a static showcase: ${name}`);
+    if (name === 'video' && !Object.values(generated).some(work => work.kind === 'video')) throw new Error('Unsupported resource element in a static showcase: video');
     for (const match of tag[0].slice(name.length + 1, -1).matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
       const attribute = match[1]!.toLowerCase();
       const value = (match[2] ?? match[3] ?? match[4] ?? '').trim();

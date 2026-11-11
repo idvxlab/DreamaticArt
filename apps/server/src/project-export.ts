@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
+import { findSolutionVersion, readSolutionFile } from "./solution-versions.js";
 
 async function writeZip(source: string, destination: string, rootName: string): Promise<void> {
   const zip = new ZipFile();
@@ -30,13 +31,15 @@ async function writeZip(source: string, destination: string, rootName: string): 
 }
 
 /** Download-only snapshot. Never alter a Run or start an agent/export workflow. */
-export async function prepareProjectExport(workspaceDir: string, runId: string, options: { publication?: Record<string, unknown>; modelFallback?: ModelUsage } = {}): Promise<{ path: string; filename: string; cleanup: () => Promise<void> }> {
+export async function prepareProjectExport(workspaceDir: string, runId: string, options: { publication?: Record<string, unknown>; modelFallback?: ModelUsage; versionId?: string } = {}): Promise<{ path: string; filename: string; cleanup: () => Promise<void> }> {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(runId)) throw new Error("Invalid run id");
   const runsRoot = await realpath(join(workspaceDir, "runs"));
   const runDir = await realpath(join(runsRoot, runId));
   if (!runDir.startsWith(`${runsRoot}${sep}`)) throw new Error("Invalid run path");
   const state = JSON.parse(await readFile(join(runDir, "run-state.json"), "utf8"));
   if (state.stages?.build !== "completed") throw new Error("Export requires a completed build");
+  const version = options.versionId === undefined ? undefined : await findSolutionVersion(workspaceDir, runId, options.versionId);
+  if (options.versionId !== undefined && !version) throw new Error("Unknown solution version");
   const events = (await readFile(join(runDir, "bus.jsonl"), "utf8").catch(() => "")).split(/\r?\n/u).filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line)]; } catch { return []; }
   });
@@ -70,17 +73,45 @@ export async function prepareProjectExport(workspaceDir: string, runId: string, 
       } else throw new Error(`Unsupported project file: ${path}`);
     }
     // Keep relative asset links intact, without sessions, caches or duplicate historical Runs.
-    for (const path of ["artifacts", "plan", "research", "review", "context", "references", "inputs", "intent.md", "research.md", "design.md", "showcase.md", "brief.json", "run-state.json", "completion-summary.json", "media-names.json"]) {
+    const sourceFiles = version ? ["brief.json"] : ["artifacts", "plan", "research", "review", "context", "references", "inputs", "intent.md", "research.md", "design.md", "showcase.md", "brief.json", "run-state.json", "completion-summary.json", "media-names.json"];
+    for (const path of sourceFiles) {
       const exists = await lstat(join(runDir, path)).then(() => true).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return false;
         throw error;
       });
       if (exists) await copy(path);
     }
-    for (const path of Object.keys(receipt ?? {})) {
+    for (const path of Object.keys(version ? {} : receipt ?? {})) {
       if (path.startsWith("artifacts/") && !files.includes(path)) throw new Error(`Committed build output is missing: ${path}`);
     }
-    const manifest = JSON.parse(await readFile(join(packageDir, "artifacts/artifact-manifest.json"), "utf8").catch(() => "{}"));
+    const manifestPath = "artifacts/artifact-manifest.json";
+    const manifest = version ? {
+      schemaVersion: 2,
+      solutionVersionId: version.id,
+      presentation: { mode: "gallery", entry: "artifacts/00-gallery.html" },
+      artifacts: [...version.images, ...(version.videos ?? [])].map(item => ({
+        deliverableId: item.id, path: item.path, digest: version.files[item.path],
+        kind: 'title' in item ? 'video' : 'image',
+      })),
+    } : JSON.parse(await readFile(join(packageDir, manifestPath), "utf8").catch(() => "{}"));
+    if (version) {
+      const snapshotFiles: [string, string][] = [
+        [version.showcasePath, manifest.presentation.entry],
+        [version.designPath, "design.md"],
+        ...manifest.artifacts.map((item: { path: string }): [string, string] => [item.path, item.path]),
+      ];
+      if (version.exhibitionPath) snapshotFiles.push([version.exhibitionPath, "showcase.md"]);
+      if (manifest.artifacts.some((item: { path: string }) => !/^artifacts\/[\w-]+\.(?:png|jpe?g|webp|gif|mp4|webm)$/iu.test(item.path))) throw new Error("Invalid solution media path");
+      for (const [source, target] of snapshotFiles) {
+        const { bytes } = await readSolutionFile(workspaceDir, runId, version.id, source);
+        await mkdir(dirname(join(packageDir, target)), { recursive: true });
+        await writeFile(join(packageDir, target), bytes);
+        files.push(target);
+      }
+      await writeFile(join(packageDir, "run-state.json"), JSON.stringify({ stages: { build: "completed" } }));
+      await writeFile(join(packageDir, manifestPath), JSON.stringify(manifest, null, 2));
+      files.push("run-state.json", manifestPath);
+    }
     const exportedBrief = JSON.parse(await readFile(join(packageDir, 'brief.json'), 'utf8'));
     const classification = resolveProjectClassification(exportedBrief, manifest);
     if (classification) {
@@ -90,7 +121,7 @@ export async function prepareProjectExport(workspaceDir: string, runId: string, 
     }
     const entry = manifest.presentation?.entry ?? "artifacts/00-gallery.html";
     if (typeof entry !== "string" || !files.includes(entry) || !entry.endsWith(".html")) throw new Error("Completed project presentation is missing");
-    if (receipt && typeof receipt["artifacts/artifact-manifest.json"] !== "string") throw new Error("Build manifest has no approval receipt");
+    if (!version && receipt && typeof receipt[manifestPath] !== "string") throw new Error("Build manifest has no approval receipt");
     if (options.modelFallback) {
       const actual = await collectModelUsage(runDir, Array.isArray(manifest.artifacts) ? manifest.artifacts : []);
       const valid = (items: unknown): ModelUsage["reasoning"] => Array.isArray(items) ? items.filter(item => item && typeof item.model === "string" && item.model.trim()) : [];

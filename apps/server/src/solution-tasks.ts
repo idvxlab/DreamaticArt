@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { atomic } from './design-pipeline.js';
+import { buildMaterialRevision, parseMaterialEdit, snapshotMaterials, type MaterialEdit, type MaterialSnapshot } from './solution-materials.js';
 import { buildSolutionRevision, type SolutionOperation } from './solution-revision.js';
 import { findSolutionVersion, publishSolutionBatch, solutionProjectDirectory } from './solution-versions.js';
 
@@ -17,9 +18,11 @@ interface SolutionTaskInput {
   prompt: string;
   originalPrompt?: string;
   operation: SolutionOperation;
+  materialEdit?: MaterialEdit;
 }
 
 interface SolutionTask extends SolutionTaskInput {
+  materialSnapshot?: MaterialSnapshot;
   outputId: string;
   outputIds: string[];
   activity?: EditAttempt[];
@@ -102,6 +105,11 @@ async function taskStatus(workspace: string, runId: string, path: string, task: 
   return task;
 }
 
+function publicSolutionTask(task: SolutionTask) {
+  const { materialSnapshot: _snapshot, ...view } = task;
+  return view;
+}
+
 export async function listSolutionTasks(workspace: string, runId: string) {
   const directory = await taskDirectory(workspace, runId);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -110,11 +118,14 @@ export async function listSolutionTasks(workspace: string, runId: string) {
     const task = await readTask(path);
     return task && taskStatus(workspace, runId, path, task);
   }));
-  return tasks.filter(task => task !== undefined).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return tasks.filter(task => task !== undefined).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicSolutionTask);
 }
 
 export async function submitSolutionTask(repoRoot: string, workspace: string, runId: string, input: Record<string, unknown>) {
-  const { id, operation, prompt, replacement, promptNodeId, originalPrompt } = input;
+  const materialEdit = input.materialEdit === undefined ? undefined : parseMaterialEdit(input.materialEdit);
+  const { id, replacement, promptNodeId, originalPrompt } = input;
+  const operation = materialEdit ? 'revise' : input.operation;
+  const prompt = materialEdit ? (materialEdit.mode === 'replace' ? 'Replace material' : 'Integrate materials') : input.prompt;
   const parents = input.parentIds ?? [input.parentId];
   const count = input.outputCount ?? (operation === 'split' ? 2 : 1);
   const notes = input.sourceNotes ?? (Array.isArray(parents) ? parents.map(() => '') : []);
@@ -129,11 +140,11 @@ export async function submitSolutionTask(repoRoot: string, workspace: string, ru
       !['recompose', 'revise', 'fuse', 'split', 'replace'].includes(String(operation))) {
     throw new Error('Invalid solution task inputs');
   }
-  return start(repoRoot, workspace, runId, {
+  return publicSolutionTask(await start(repoRoot, workspace, runId, {
     id, parentIds: parents, sourceNotes: notes, prompt: prompt.trim(), ...(typeof originalPrompt === 'string' ? { originalPrompt } : {}), operation: operation as SolutionOperation,
-    outputCount: Number(count), ...(typeof replacement === 'string' ? { replacement } : {}),
+    outputCount: Number(count), ...(materialEdit ? { materialEdit } : {}), ...(!materialEdit && typeof replacement === 'string' ? { replacement } : {}),
     ...(typeof promptNodeId === 'string' ? { promptNodeId } : {}),
-  }, false);
+  }, false));
 }
 
 export async function solutionTaskAction(repoRoot: string, workspace: string, runId: string, id: string, action: 'cancel' | 'retry') {
@@ -144,20 +155,20 @@ export async function solutionTaskAction(repoRoot: string, workspace: string, ru
     if (running) {
       const task = await running.ready;
       running.controller.abort();
-      return task;
+      return publicSolutionTask(task);
     }
   }
   const task = await readTask(path);
   if (!task) throw new Error('Solution task not found');
-  if (action === 'retry') return start(repoRoot, workspace, runId, task, true);
-  return taskStatus(workspace, runId, path, task);
+  if (action === 'retry') return publicSolutionTask(await start(repoRoot, workspace, runId, task, true));
+  return publicSolutionTask(await taskStatus(workspace, runId, path, task));
 }
 
 async function start(repoRoot: string, workspace: string, runId: string, input: SolutionTaskInput, retry: boolean) {
   const directory = await taskDirectory(workspace, runId);
   const path = join(directory, input.id + '.json');
   const verify = (task: SolutionTask) => {
-    if (JSON.stringify(task.parentIds) !== JSON.stringify(input.parentIds) || JSON.stringify(task.sourceNotes) !== JSON.stringify(input.sourceNotes) || task.prompt !== input.prompt || task.originalPrompt !== input.originalPrompt || task.operation !== input.operation || task.outputCount !== input.outputCount || task.replacement !== input.replacement || task.promptNodeId !== input.promptNodeId) {
+    if (JSON.stringify(task.parentIds) !== JSON.stringify(input.parentIds) || JSON.stringify(task.sourceNotes) !== JSON.stringify(input.sourceNotes) || JSON.stringify(task.materialEdit) !== JSON.stringify(input.materialEdit) || task.prompt !== input.prompt || task.originalPrompt !== input.originalPrompt || task.operation !== input.operation || task.outputCount !== input.outputCount || task.replacement !== input.replacement || task.promptNodeId !== input.promptNodeId) {
       throw new Error('Solution task ID already has different inputs');
     }
     return task;
@@ -183,9 +194,12 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
     const outputIds = saved?.outputIds ?? Array.from({ length: input.outputCount }, (_, index) => batch + String(index).padStart(2, '0'));
     const attempt = (saved?.attempt ?? 0) + 1;
     const activity = editActivityLog(attempt, () => { const value = structuredClone(task); return () => atomic(path, value); });
+    const materialSnapshot = input.materialEdit
+      ? saved?.materialSnapshot ?? await snapshotMaterials(workspace, parents[0]!, directory, input.materialEdit, controller.signal)
+      : undefined;
     const task: SolutionTask = {
       id: input.id, parentIds: input.parentIds, sourceNotes: input.sourceNotes, prompt: input.prompt,
-      operation: input.operation, outputCount: input.outputCount, ...(input.originalPrompt ? { originalPrompt: input.originalPrompt } : {}),
+      operation: input.operation, outputCount: input.outputCount, ...(input.materialEdit && materialSnapshot ? { materialEdit: input.materialEdit, materialSnapshot } : {}), ...(input.originalPrompt ? { originalPrompt: input.originalPrompt } : {}),
       ...(input.replacement ? { replacement: input.replacement } : {}),
       ...(input.promptNodeId ? { promptNodeId: input.promptNodeId } : {}),
       createdAt: saved?.createdAt ?? new Date().toISOString(), attempt, activity: [...(saved?.activity ?? []), activity.attempt],
@@ -205,7 +219,10 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
         task.status = 'running';
         await activity.start();
         staging = await mkdtemp(join(directory, '.build-'));
-        const deliveries = await buildSolutionRevision({
+        if (task.materialEdit) { task.phase = 'showcase'; await activity.write(); }
+        const deliveries = task.materialEdit && task.materialSnapshot
+          ? [await buildMaterialRevision({ repoRoot, workspace, parent: parents[0]!, directory, staging, edit: task.materialEdit, snapshot: task.materialSnapshot, signal, report: activity.report })]
+          : await buildSolutionRevision({
           repoRoot, workspace, parents, staging, signal, request: task.prompt, outputCount: task.outputCount,
           report: activity.report, operation: task.operation, sourceNotes: task.sourceNotes, ...(task.replacement ? { replacement: task.replacement } : {}),
           progress: async (phase, completed) => { signal.throwIfAborted(); task.phase = phase; task.completed = completed; await activity.write(); }

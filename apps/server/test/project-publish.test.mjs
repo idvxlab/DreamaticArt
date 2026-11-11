@@ -5,8 +5,9 @@ import {join,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {publishProject,publicationStatus,normalizeCreator,publicationEndpoint} from '../dist/project-publish.js';
+import {getFinalSolutionId, setFinalSolutionId} from '../dist/solution-versions.js';
 const exec=promisify(execFile);
 async function fixture(t){const workspace=await mkdtemp(join(tmpdir(),'dreamatic-publish-test-'));t.after(()=>rm(workspace,{recursive:true,force:true}));const run=join(workspace,'runs','project-test');for(const [file,value]of Object.entries({'run-state.json':JSON.stringify({stages:{build:'completed'}}),'brief.json':'{"title":"Test publication"}','artifacts/artifact-manifest.json':'{"presentation":{"entry":"artifacts/home/index.html"}}','artifacts/home/index.html':'<h1>Public design</h1>'})){await mkdir(dirname(join(run,file)),{recursive:true});await writeFile(join(run,file),value)}return {workspace,run}}
 test('publishing requires explicit consent and a secure configured destination; attribution cannot forge identity',async t=>{
@@ -108,4 +109,57 @@ test('rate-limit rejection does not mark a new project as possibly published',as
 test('mixed HTML and generated image delivery can publish, but missing images and decorative assets cannot bypass the restriction',async t=>{
  const f=await fixture(t),original=globalThis.fetch;t.after(()=>{globalThis.fetch=original});let calls=0;globalThis.fetch=async(_url,init)=>{calls++;await new Response(init.body).arrayBuffer();return new Response(JSON.stringify({projectId:'published-mixed',previewUrl:'/gallery-assets/published-mixed/artifacts/home/index.html',galleryUrl:'/#gallery'}),{status:201})};
  const manifest={presentation:{mode:'html',entry:'artifacts/home/index.html'},htmlEntries:['artifacts/home/index.html'],artifacts:[{method:'html_generate',path:'artifacts/home/index.html'},{method:'image_generate',path:'artifacts/hero.png'}]};await writeFile(join(f.run,'artifacts/artifact-manifest.json'),JSON.stringify(manifest));await assert.rejects(publishProject(f.workspace,'project-test',{confirmed:true},'https://www.dreamatic.art'),/HTML UX/);assert.equal(calls,0);await writeFile(join(f.run,'artifacts/hero.png'),'delivered image');await publishProject(f.workspace,'project-test',{confirmed:true},'https://www.dreamatic.art');assert.equal(calls,1);
+});
+test('publication pins the selected solution and packages its page, documents and media', async t => {
+ const f = await fixture(t), original = globalThis.fetch;
+ t.after(() => { globalThis.fetch = original; });
+ const runId = 'project-test', id = 'a'.repeat(64);
+ const snapshot = join(f.run, 'solution-versions', id);
+ const assets = {
+  'final/00-index.html': '<html><body><h1>Selected work</h1><img src="../artifacts/selected.png"><video controls src="../artifacts/clip.webm"></video></body></html>',
+  'artifacts/selected.png': 'selected still',
+  'artifacts/clip.webm': 'selected video',
+  'design.md': '# Selected design',
+  'showcase.md': '# Selected exhibition',
+ };
+ for (const [path, content] of Object.entries(assets)) {
+  await mkdir(dirname(join(snapshot, path)), { recursive: true });
+  await writeFile(join(snapshot, path), content);
+ }
+ await writeFile(join(snapshot, 'version.json'), JSON.stringify({
+  id, runId, title: 'Selected version', images: [{ id: 'still', path: 'artifacts/selected.png' }],
+  videos: [{ id: 'clip', title: 'Clip', path: 'artifacts/clip.webm' }], heroId: 'still',
+  showcasePath: 'final/00-index.html', designPath: 'design.md', exhibitionPath: 'showcase.md',
+  files: Object.fromEntries(Object.entries(assets).map(([path, content]) => [path, createHash('sha256').update(content).digest('hex')])),
+ }));
+ assert.equal(await getFinalSolutionId(f.workspace, runId), null);
+ await assert.rejects(setFinalSolutionId(f.workspace, runId, 'b'.repeat(64)), /Unknown solution version/);
+ await setFinalSolutionId(f.workspace, runId, id);
+ assert.equal(await getFinalSolutionId(f.workspace, runId), id);
+ let uploads = 0;
+ globalThis.fetch = async (_url, init) => {
+  if (!init?.body) return new Response(JSON.stringify({}), { status: 503 });
+  uploads++;
+  const zip = join(f.workspace, 'selected.zip');
+  await writeFile(zip, Buffer.from(await new Response(init.body).arrayBuffer()));
+  const member = async path => (await exec('unzip', ['-p', zip, `${runId}/${path}`])).stdout;
+  const entry = 'artifacts/00-gallery.html';
+  assert.equal(JSON.parse(await member('package-manifest.json')).entry, entry);
+  const manifest = JSON.parse(await member('artifacts/artifact-manifest.json'));
+  assert.equal(manifest.presentation.entry, entry);
+  assert.equal(manifest.solutionVersionId, id);
+  assert.match(await member(entry), /Selected work.*\.\.\/artifacts\/selected.png.*\.\.\/artifacts\/clip.webm/);
+  for (const path of ['artifacts/selected.png', 'artifacts/clip.webm', 'design.md', 'showcase.md']) assert.equal(await member(path), assets[path]);
+  assert.doesNotMatch((await exec('unzip', ['-Z1', zip])).stdout, /home\/index.html|solution-versions|final-solution.json/);
+  return new Response(JSON.stringify({ projectId: 'published-test', previewUrl: '/gallery-assets/published-test/' + entry, galleryUrl: '/#gallery' }), { status: 201 });
+ };
+ const site = 'https://www.dreamatic.art';
+ await assert.rejects(publishProject(f.workspace, runId, { confirmed: true, versionId: null }, site), /final solution changed/);
+ assert.equal(uploads, 0);
+ await publishProject(f.workspace, runId, { confirmed: true, versionId: id }, site);
+ assert.equal(uploads, 1);
+ assert.equal((await publicationStatus(f.workspace, runId, site)).versionId, id);
+ await writeFile(join(snapshot, 'artifacts/selected.png'), 'modified');
+ await assert.rejects(publishProject(f.workspace, runId, { confirmed: true, versionId: id, overwriteConfirmed: true }, site), /Version file changed/);
+ assert.equal(uploads, 1);
 });
