@@ -2,7 +2,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import { Sparkles, X } from "lucide-react";
 import { useI18n } from "../i18n";
-import { APP_VERSION, VERSION_REPOSITORY_URL } from "../app-info";
+import { APP_VERSION, REPOSITORY_URL } from "../app-info";
 
 export function AboutModal({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
@@ -24,7 +24,7 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
       <p className="about-version">{t("Version")} {APP_VERSION}</p>
       <p className="about-description">{t("An AI design team that turns your brief into research-informed design concepts, generated visuals, and curated showcase pages.")}</p>
       <dl><div><dt>{t("Created by")}</dt><dd><a href="https://idvxlab.com/" target="_blank" rel="noopener noreferrer">Intelligent Design &amp; Innovation Lab</a></dd></div><div><dt>{t("License")}</dt><dd>MIT</dd></div></dl>
-      <div className="about-links"><a href="https://www.dreamatic.art/" target="_blank" rel="noopener noreferrer">{t("Official website")}</a><a href={VERSION_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">GitHub</a></div>
+      <div className="about-links"><a href="https://www.dreamatic.art/" target="_blank" rel="noopener noreferrer">{t("Official website")}</a><a href={REPOSITORY_URL} target="_blank" rel="noopener noreferrer">GitHub</a></div>
       <small className="about-copyright">© 2026 IDVX Lab and contributors</small>
     </section>
   </div>, document.body);

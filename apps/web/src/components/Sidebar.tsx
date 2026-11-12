@@ -1,7 +1,7 @@
 import { useI18n } from "../i18n";
 import { BookOpen, FileText, Images, LayoutDashboard, FileImage, Info, Github, Check, ChevronDown, Layers3, MoreHorizontal, Pencil, Plus, Search, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { VERSION_REPOSITORY_URL } from "../app-info";
+import { REPOSITORY_URL } from "../app-info";
 import { AboutModal } from "./AboutModal";
 import type { RunView, WorkbenchView } from "../types";
 
@@ -99,7 +99,7 @@ export function Sidebar({ view, onChangeView, runs, activeRunId, onCreate, onSel
           const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
           if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) { event.preventDefault(); const index = items.indexOf(document.activeElement as HTMLElement); const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length; items[next]?.focus(); }
         }}>
-          <a role="menuitem" href={VERSION_REPOSITORY_URL} target="_blank" rel="noopener noreferrer" onClick={() => setBrandMenuOpen(false)}><Github size={16} /> GitHub</a>
+          <a role="menuitem" href={REPOSITORY_URL} target="_blank" rel="noopener noreferrer" onClick={() => setBrandMenuOpen(false)}><Github size={16} /> GitHub</a>
           <button role="menuitem" onClick={() => { setBrandMenuOpen(false); onSettings(); }}><Settings2 size={16} /> {t("Settings")}</button>
           <button role="menuitem" onClick={() => { setBrandMenuOpen(false); setAboutOpen(true); }}><Info size={16} /> {t("About Dreamatic · Art")}</button>
         </div>}
