@@ -26,8 +26,8 @@ Dreamatic · Art is an open-source, local-first AI design workbench for web and 
 Use **Node.js 22.19 or newer** and npm.
 
 ```sh
-git clone https://github.com/idvxlab/Dreamatic.git
-cd Dreamatic
+git clone https://github.com/idvxlab/DreamaticArt.git
+cd DreamaticArt
 npm ci
 cp .env.example .env
 npm run build
