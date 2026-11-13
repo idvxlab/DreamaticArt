@@ -5,6 +5,7 @@ import { mkdir } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startRuntime, localTarget } from './lifecycle.mjs';
+import { checkForUpdate, downloadUpdate } from './updates.mjs';
 app.setName('DreamaticArt');
 const smoke = process.env.DREAMATIC_DESKTOP_SMOKE === '1';
 app.setPath('userData', process.env.DREAMATIC_DESKTOP_TEST_DATA || join(app.getPath('appData'), 'Dreamatic'));
@@ -55,8 +56,51 @@ else {
     });
     mainWindow = new BrowserWindow({ title: 'DreamaticArt', width: 1440, height: 940, minWidth: 900, minHeight: 600, show: false, backgroundColor: '#f8f7f5', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), nodeIntegration: false, contextIsolation: true, sandbox: true } });
     guard(mainWindow);
+    let updating = false;
+    async function update(item) {
+      if (updating) return;
+      updating = true;
+      item.enabled = false;
+      const show = options => mainWindow.isDestroyed()
+        ? dialog.showMessageBox(options)
+        : dialog.showMessageBox(mainWindow, options);
+      const progress = value => { if (!mainWindow.isDestroyed()) mainWindow.setProgressBar(value); };
+      try {
+        const current = app.getVersion();
+        progress(2);
+        const result = await checkForUpdate(current, process.platform, process.arch);
+        progress(-1);
+        if (result.status === 'current') {
+          await show({ type: 'info', title: 'Update', message: `DreamaticArt ${current} is up to date.` });
+          return;
+        }
+        if (result.status === 'unavailable') {
+          await show({ type: 'warning', title: 'Update', message: `Version ${result.version} is available.`, detail: `No installer was published for ${process.platform} (${process.arch}).` });
+          return;
+        }
+        const downloads = app.getPath('downloads');
+        await mkdir(downloads, { recursive: true });
+        progress(0);
+        const installer = await downloadUpdate(result.asset, downloads, progress);
+        progress(-1);
+        const { response } = await show({
+          type: 'info', title: 'Update', message: `Version ${result.version} downloaded.`, detail: installer,
+          buttons: ['Show in Folder', 'Close'], defaultId: 0, cancelId: 1,
+        });
+        if (response === 0) shell.showItemInFolder(installer);
+      } catch (error) {
+        progress(-1);
+        const detail = error instanceof Error ? error.message : String(error);
+        log?.write(`Update failed: ${detail}\n`);
+        await show({ type: 'error', title: 'Update', message: 'Could not complete the update download.', detail });
+      } finally {
+        progress(-1);
+        item.enabled = true;
+        updating = false;
+      }
+    }
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: 'DreamaticArt', submenu: [{ role: 'about' }, { type: 'separator' }, { label: 'Open Project Folder', click: async () => { const health = await fetch(`${origin}/api/health`).then(r => r.json()); await shell.openPath(health.workspaceDir); } }, { label: 'Open Configuration Folder', click: () => { void shell.openPath(dataDir); } }, { type: 'separator' }, { role: 'quit' }] },
+      { label: 'DreamaticArt', submenu: [{ role: 'about' }, { label: 'Update…', click: item => { void update(item); } }, { type: 'separator' }, { label: 'Open Project Folder', click: async () => { const health = await fetch(`${origin}/api/health`).then(r => r.json()); await shell.openPath(health.workspaceDir); } }, { label: 'Open Configuration Folder', click: () => { void shell.openPath(dataDir); } }, { type: 'separator' }, { role: 'quit' }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     ]));
     mainWindow.once('ready-to-show', () => mainWindow.show());

@@ -3,6 +3,20 @@ import { modelActivityUsage, type EditActivityReporter } from './edit-activity.j
 import { setting } from './design-pipeline.js';
 import { createModelResponseTimer } from './model-response-timer.js';
 
+function responseFailureDetail(timer: ReturnType<typeof createModelResponseTimer>, stopReason?: string) {
+  const { startedAt, timedOutAt, lastOutput, lastStreamEvent } = timer.diagnostics;
+  const describe = (event?: { type: string; at: number }) =>
+    event ? `${event.type} at ${new Date(event.at).toISOString()}` : 'none';
+  return [
+    `Model stop reason: ${stopReason ?? 'not reported'}`,
+    ...(timer.failure ? [`Timeout phase: ${timer.failure}`] : []),
+    ...(startedAt !== undefined ? [`Response started: ${new Date(startedAt).toISOString()}`] : []),
+    `Last effective output: ${describe(lastOutput)}`,
+    `Last observed stream event: ${describe(lastStreamEvent)}`,
+    ...(timedOutAt !== undefined ? [`Timed out: ${new Date(timedOutAt).toISOString()}`] : []),
+  ].join(' · ');
+}
+
 export async function promptSolutionModel(agent: Awaited<ReturnType<typeof createDreamaticAgent>>, text: string, signal: AbortSignal, role: 'editor' | 'builder', report?: EditActivityReporter, recovery?: { shouldStop: () => boolean; retryIf: () => boolean; retryMessage: () => string; failureMessage?: () => string }) {
   const { session, prompt } = agent;
   const abort = () => { void session.abort(); };
@@ -13,12 +27,17 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
     totalMs: Number(setting('DREAMATIC_MODEL_TOTAL_TIMEOUT_MS')),
     onTimeout: abort,
   });
+  let timeoutReported = false;
   report?.({ actor: role, label: 'Agent execution', state: 'started' });
   const unsubscribe = session.subscribe(event => {
     timer.handle(event);
     if (event.type === 'message_end' && event.message.role === 'assistant') {
-      const failed = event.message.stopReason === 'error' || event.message.stopReason === 'aborted';
-      report?.({ actor: role, label: 'Model response', state: failed ? 'failed' : 'completed' }, modelActivityUsage(event.message.usage));
+      const failed = Boolean(timer.failure) || event.message.stopReason === 'error' || event.message.stopReason === 'aborted';
+      timeoutReported ||= Boolean(timer.failure);
+      report?.({
+        actor: role, label: 'Model response', state: failed ? 'failed' : 'completed',
+        ...(failed ? { detail: responseFailureDetail(timer, event.message.stopReason) } : {}),
+      }, modelActivityUsage(event.message.usage));
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       const detail = event.type === 'tool_execution_end' && event.isError && event.toolName === 'plan_showcase'
         ? event.result.content.find((block: { type: string; text?: string }) => block.type === 'text')?.text?.slice(0, 1800)
@@ -46,6 +65,9 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
     report?.({ actor: role, label: 'Agent execution', state: 'completed' });
     return session.getLastAssistantText() || '';
   } catch (error) {
+    if (timer.failure && !timeoutReported) {
+      report?.({ actor: role, label: 'Model response', state: 'failed', detail: responseFailureDetail(timer) }, {});
+    }
     report?.({ actor: role, label: 'Agent execution', state: 'failed' });
     throw error;
   } finally {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createModelResponseTimer} from '../dist/model-response-timer.js';
 function fixture(totalMs, idleMs) {
  let now=0, next=0;const pending=new Map(), failures=[];
- const clock={set(callback,ms){const id=++next;pending.set(id,{callback,at:now+ms});return id;},clear(id){pending.delete(id);}};
+ const clock={set(callback,ms){const id=++next;pending.set(id,{callback,at:now+ms});return id;},clear(id){pending.delete(id);},now(){return now;}};
  const timer=createModelResponseTimer({firstOutputMs:100,generationMs:200,...(idleMs?{idleMs}:{}),...(totalMs?{totalMs}:{}),clock,onTimeout:phase=>failures.push(phase)});
  const advance=ms=>{const end=now+ms;while(true){const due=[...pending.entries()].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;now=due[1].at;pending.delete(due[0]);due[1].callback();}now=end;};
  return {timer,advance,failures,pending};
@@ -44,10 +44,16 @@ test('idle timer starts only on real output, resets on deltas, and ignores empty
  const f=fixture(undefined,40);f.timer.handle(event('turn_start'));f.advance(90);assert.deepEqual(f.failures,[]);
  f.timer.handle(token());f.advance(30);f.timer.handle(token('thinking_delta'));f.advance(30);f.timer.handle(token('toolcall_delta'));f.advance(39);assert.deepEqual(f.failures,[]);
  f.timer.handle(token('text_delta',''));f.advance(1);assert.deepEqual(f.failures,['idle']);assert.equal(f.pending.size,0);
+ assert.deepEqual(f.timer.diagnostics,{
+  startedAt:0,timedOutAt:190,
+  lastOutput:{type:'toolcall_delta',at:150},
+  lastStreamEvent:{type:'text_delta',at:189},
+ });
 });
 test('idle budget excludes tool execution, resets per response and does not extend generation cap',()=>{
  const f=fixture(undefined,40);f.timer.handle(event('turn_start'));f.timer.handle(token());f.advance(20);f.timer.handle(event('tool_execution_start'));f.advance(900000);assert.deepEqual(f.failures,[]);
  f.timer.handle(event('turn_start'));f.advance(90);f.timer.handle(token());
+ assert.equal(f.timer.diagnostics.lastOutput.at,900110);
  for(let i=0;i<6;i++){f.advance(30);f.timer.handle(token());}
  f.advance(20);assert.deepEqual(f.failures,['generation']);assert.equal(f.pending.size,0);
 });

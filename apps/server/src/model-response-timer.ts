@@ -2,7 +2,10 @@
 export interface ResponseTimerClock {
   set(callback: () => void, milliseconds: number): unknown;
   clear(handle: unknown): void;
+  now?(): number;
 }
+type StreamEvent = { type: string; at: number };
+
 export function createModelResponseTimer(options: {
   firstOutputMs: number;
   generationMs: number;
@@ -11,7 +14,7 @@ export function createModelResponseTimer(options: {
   onTimeout: (phase: 'first_output' | 'generation' | 'total' | 'idle') => void;
   clock?: ResponseTimerClock;
 }) {
-  const clock = options.clock ?? {
+  const clock: ResponseTimerClock = options.clock ?? {
     set: (callback: () => void, ms: number) => setTimeout(callback, ms),
     clear: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   };
@@ -21,6 +24,11 @@ export function createModelResponseTimer(options: {
   let active = false;
   let hasOutput = false;
   let failure: 'first_output' | 'generation' | 'total' | 'idle' | undefined;
+  let startedAt: number | undefined;
+  let timedOutAt: number | undefined;
+  let lastOutput: StreamEvent | undefined;
+  let lastStreamEvent: StreamEvent | undefined;
+  const now = () => clock.now?.() ?? Date.now();
   const stop = () => {
     if (phaseTimer !== undefined) clock.clear(phaseTimer);
     if (totalTimer !== undefined) clock.clear(totalTimer);
@@ -31,6 +39,7 @@ export function createModelResponseTimer(options: {
   const expire = (phase: NonNullable<typeof failure>) => {
     if (!active || failure) return;
     failure = phase;
+    timedOutAt = now();
     stop();
     options.onTimeout(phase);
   };
@@ -39,18 +48,23 @@ export function createModelResponseTimer(options: {
     if (failure) return;
     active = true;
     hasOutput = false;
+    startedAt = now();
+    lastOutput = lastStreamEvent = undefined;
     phaseTimer = clock.set(() => expire('first_output'), options.firstOutputMs);
     if (options.totalMs) totalTimer = clock.set(() => expire('total'), options.totalMs);
   };
   return {
     get failure() { return failure; },
+    get diagnostics() { return { startedAt, timedOutAt, lastOutput, lastStreamEvent }; },
     handle(event: { type: string; message?: { role: string }; assistantMessageEvent?: { type: string; delta?: unknown } }) {
       if (event.type === 'turn_start') start();
       // message_start may precede the first token. It must not reset the initial allowance.
       if (event.type === 'message_start' && event.message?.role === 'assistant' && !active && !failure) start();
       if (event.type === 'message_update' && active) {
         const update = event.assistantMessageEvent;
+        if (update) lastStreamEvent = { type: update.type, at: now() };
         if (update && (update.type === 'toolcall_start' || (['text_delta', 'thinking_delta', 'toolcall_delta'].includes(update.type) && typeof update.delta === 'string' && update.delta.length > 0))) {
+          lastOutput = lastStreamEvent;
           if (!hasOutput) {
             hasOutput = true;
             if (phaseTimer !== undefined) clock.clear(phaseTimer);
