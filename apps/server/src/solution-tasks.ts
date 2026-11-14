@@ -1,4 +1,4 @@
-import type { EditAttempt } from '@dreamatic/project-data';
+import type { EditAttempt, SolutionImageProgress } from '@dreamatic/project-data';
 import { editActivityLog } from './edit-activity.js';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
@@ -28,6 +28,7 @@ interface SolutionTask extends SolutionTaskInput {
   activity?: EditAttempt[];
   phase?: string;
   completed?: number;
+  imageProgress?: SolutionImageProgress;
   createdAt: string;
   attempt: number;
   status: 'waiting' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
@@ -137,7 +138,7 @@ export async function submitSolutionTask(repoRoot: string, workspace: string, ru
       !Number.isInteger(count) || (operation === 'split' ? Number(count) < 2 || Number(count) > 4 : count !== 1) ||
       (operation === 'replace' && (typeof replacement !== 'string' || !/^[a-zA-Z0-9_-]+$/u.test(replacement))) ||
       (promptNodeId !== undefined && (typeof promptNodeId !== 'string' || !taskId.test(promptNodeId))) ||
-      !['recompose', 'revise', 'fuse', 'split', 'replace'].includes(String(operation))) {
+      !['recompose', 'revise', 'append', 'fuse', 'split', 'replace'].includes(String(operation))) {
     throw new Error('Invalid solution task inputs');
   }
   return publicSolutionTask(await start(repoRoot, workspace, runId, {
@@ -225,8 +226,16 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
           : await buildSolutionRevision({
           repoRoot, workspace, parents, staging, signal, request: task.prompt, outputCount: task.outputCount,
           report: activity.report, operation: task.operation, sourceNotes: task.sourceNotes, ...(task.replacement ? { replacement: task.replacement } : {}),
-          progress: async (phase, completed) => { signal.throwIfAborted(); task.phase = phase; task.completed = completed; await activity.write(); }
+          progress: async (phase, completed, images) => {
+            signal.throwIfAborted();
+            task.phase = phase;
+            task.completed = completed;
+            if (images) task.imageProgress = images;
+            await activity.write();
+          }
         });
+        task.phase = 'publishing';
+        task.completed = deliveries.length;
         activity.report({ actor: 'system', label: 'Publish versions', state: 'started' });
         await publishSolutionBatch({ workspace, runId, parents, taskId: task.id, outputIds: task.outputIds, deliveries, signal });
         activity.report({ actor: 'system', label: 'Publish versions', state: 'completed' });

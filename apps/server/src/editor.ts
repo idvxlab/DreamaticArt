@@ -7,7 +7,7 @@ import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:
 import { join, sep } from 'node:path';
 import { editProjectImage, imageEditSettings, imageBytesKind, type ImageEditDecision } from './image-edit.js';
 import { projectInputDirectory } from './media-upload.js';
-import { projectFiles, projectFileContent, type ProjectFile } from './project-files.js';
+import { projectMediaCatalog, projectFileContent, type ProjectFile } from './project-files.js';
 
 export interface EditorInput {
   id: string; prompt: string; originalPrompt?: string; source: 'canvas' | 'natural-language'; inputIds: string[];
@@ -72,7 +72,7 @@ function record(journal: Journal, task: EditorTask) {
 const taskKey = (workspace: string, runId: string, id: string) => JSON.stringify([workspace, runId, id]);
 export async function listEditorTasks(workspace: string, runId: string): Promise<EditorTask[]> {
   return transaction(workspace, runId, async journal => {
-    const catalog = await projectFiles(workspace, runId);
+    const catalog = await projectMediaCatalog(workspace, runId, journal.tasks.flatMap(task => task.inputIds));
     for (let task of [...journal.tasks]) {
       const unavailableInputIds = task.inputIds.filter(id => !catalog.some(file => file.id === id));
       if (JSON.stringify(task.unavailableInputIds ?? []) !== JSON.stringify(unavailableInputIds)) { task = { ...task, unavailableInputIds }; record(journal, task); }

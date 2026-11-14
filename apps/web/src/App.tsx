@@ -1,3 +1,4 @@
+import { versionFiles } from './version-files';
 import { PROJECT_CATEGORIES, projectClassification } from '@dreamatic/project-data/project-classification';
 import { usePublication } from "./publication-state";
 import { useI18n, LanguageToggle } from "./i18n";
@@ -157,10 +158,16 @@ export function App() {
     });
   }, [activeRunId]);
   useEffect(() => {
-    if (view === 'canvas' || view === 'preview') refreshVersions();
+    if (['canvas', 'preview', 'context', 'assets'].includes(view)) refreshVersions();
     return () => { versionRequest.current++; };
   }, [view, refreshVersions, activeRun?.status]);
   const versions = versionState.runId === activeRunId ? versionState.versions : [];
+  const [canvasVersionIds, setCanvasVersionIds] = useState<string[]>([]);
+  const [canvasAssetScope, setCanvasAssetScope] = useState<'version' | 'project'>('version');
+  const canvasSelectionKey = canvasVersionIds.join(':');
+  useEffect(() => { setCanvasAssetScope('version'); }, [activeRunId, canvasSelectionKey]);
+  const [assetScope, setAssetScope] = useState<'version' | 'project'>('version');
+  const canvasVersion = versions.find(version => canvasVersionIds.length === 1 && version.id === canvasVersionIds[0]);
   const selectedSolution = versions.find(version => version.id === finalSolution?.versionId);
   const previewVersion = previewSolution?.runId === activeRunId ? previewSolution : undefined;
   function openSolutionPreview(version: SolutionVersion) {
@@ -169,8 +176,25 @@ export function App() {
     setPreviewPanelOpen(false);
     setView('preview');
   }
-  useEffect(() => { setCanvasAdd(undefined); setSolutionAdd(undefined); setEditorLibrary('versions'); }, [activeRunId]);
-  const sectionFiles = projectFiles.files.filter(file => file.category === (view === 'canvas' ? 'assets' : view) && (view !== 'canvas' || mediaKind(file)));
+  useEffect(() => { setCanvasAdd(undefined); setSolutionAdd(undefined); setEditorLibrary('versions'); setCanvasVersionIds([]); setAssetScope('version'); }, [activeRunId]);
+  const versionMedia = useMemo(() => versions.flatMap(version => versionFiles(version, 'assets')), [versions]);
+  const canvasFiles = useMemo(() => [...projectFiles.files, ...versionMedia], [projectFiles.files, versionMedia]);
+  const finalScoped = view === 'context' || (view === 'assets' && assetScope === 'version');
+  const awaitingFinal = finalScoped && !finalSolution?.error && finalSolution?.versionId === undefined && versions.length > 0;
+  const unavailableFinal = finalScoped && Boolean(finalSolution?.versionId && !selectedSolution);
+  const sharedContext = projectFiles.files.filter(file => file.category === 'context' && !['design.md', 'showcase.md'].includes(file.path ?? file.id))
+    .map(file => ({ ...file, group: 'Project context' }));
+  const sectionFiles = view === 'context' && selectedSolution
+    ? [...versionFiles(selectedSolution, 'context'), ...sharedContext]
+    : view === 'assets' && selectedSolution && assetScope === 'version' ? versionFiles(selectedSolution, 'assets')
+    : view === 'canvas' && canvasAssetScope === 'version' && canvasVersionIds.length ? (canvasVersion ? versionFiles(canvasVersion, 'assets') : [])
+    : finalScoped && (awaitingFinal || unavailableFinal || finalSolution?.error) ? []
+    : projectFiles.files.filter(file => file.category === (view === 'canvas' ? 'assets' : view) && (view !== 'canvas' || mediaKind(file)));
+  const scopeLabel = view === 'canvas' ? canvasAssetScope === 'version' && canvasVersionIds.length
+    ? canvasVersion?.title ?? t(canvasVersionIds.length > 1 ? 'Select one solution to view its assets.' : 'Version unavailable')
+    : t('Project assets')
+    : finalScoped && selectedSolution ? selectedSolution.title
+    : view === 'assets' ? t('Project assets') : undefined;
   const selectedFileId = fileSelection.runId === activeRunId ? fileSelection.items[view] : undefined;
   const documentFile = sectionFiles.find(file => file.id === selectedFileId) ?? sectionFiles[0];
   function navigate(next: WorkbenchView, file?: ProjectFile) {
@@ -579,7 +603,7 @@ export function App() {
         </header>
         <div className="workspace-content">
           {view === "overview" && <ProjectOverview run={activeRun} workflow={workflow} assets={visibleAssets} files={projectFiles.files} running={agentRunning} pending={pendingAgentStatus} onNavigate={navigate} />}
-          <div className="canvas-container" hidden={view !== "canvas"}><Canvas versions={versions} finalVersionId={finalSolution?.versionId} selectingFinal={finalSolution?.saving} onSelectFinal={chooseFinalSolution} onPreviewSolution={openSolutionPreview} solutionAdd={solutionAdd?.runId === activeRunId ? solutionAdd : undefined} onVersionsChanged={refreshVersions} onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={projectFiles.files} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewSolution(undefined); setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
+          <div className="canvas-container" hidden={view !== "canvas"}><Canvas versions={versions} finalVersionId={finalSolution?.versionId} selectingFinal={finalSolution?.saving} onSelectFinal={chooseFinalSolution} onPreviewSolution={openSolutionPreview} solutionAdd={solutionAdd?.runId === activeRunId ? solutionAdd : undefined} onVersionsChanged={refreshVersions} onRenamed={projectFiles.refresh} key={activeRunId ?? "empty"} files={canvasFiles} onSelectVersions={setCanvasVersionIds} run={activeRun} visible={view === "canvas"} addRequest={canvasAdd?.runId === activeRunId ? canvasAdd : undefined} onSelectFile={file => { setCanvasAdd(undefined); setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); }} onOpenPreview={path => { setPreviewSolution(undefined); setPreviewEntry(path); setPreviewPanelOpen(false); setView("preview"); }} /></div>
           {view === "preview" && <Showcase key={activeRunId ?? "empty"} run={activeRun} entry={previewEntry}
             version={previewVersion ?? (previewEntry ? undefined : selectedSolution)} finalVersionId={finalSolution?.versionId}
             selectionError={finalSolution?.error} selectingFinal={finalSolution?.saving}
@@ -601,7 +625,15 @@ export function App() {
           setSolutionAdd({ runId: version.runId, versionId: version.id, nonce: crypto.randomUUID() });
           if (toolPanel.viewportWidth <= 900) setPanelOpen(false);
         }} />}
-      {!conversationView && (view !== 'canvas' || editorLibrary === 'assets') && <WorkspaceFileList key={`${activeRunId}:${view}`} runId={activeRunId} files={sectionFiles} selected={documentFile?.id} title={view === 'context' ? 'Context' : (view === 'assets' || view === 'canvas') ? 'Asset library' : 'References'} loading={projectFiles.loading} error={projectFiles.error} canvasMode={view === 'canvas'} onAddResult={file => { if (activeRunId) { setCanvasAdd({ runId: activeRunId, fileId: file.id, nonce: crypto.randomUUID() }); if (toolPanel.viewportWidth <= 900) setPanelOpen(false); } }} onSelect={file => { if (view === 'canvas') setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); else navigate(view, file); }} onRetry={projectFiles.refresh} />}
+      {view === 'canvas' && editorLibrary === 'assets' && canvasVersionIds.length > 0 && <div className="solution-library-switch" role="group" aria-label={t('Asset scope')}>
+        <button aria-pressed={canvasAssetScope === 'version'} onClick={() => setCanvasAssetScope('version')}>{t('Selected solution')}</button>
+        <button aria-pressed={canvasAssetScope === 'project'} onClick={() => setCanvasAssetScope('project')}>{t('Project assets')}</button>
+      </div>}
+      {view === 'assets' && Boolean(finalSolution?.versionId) && <div className="solution-library-switch" role="group" aria-label={t('Asset scope')}>
+        <button aria-pressed={assetScope === 'version'} onClick={() => setAssetScope('version')}>{t('Final solution')}</button>
+        <button aria-pressed={assetScope === 'project'} onClick={() => setAssetScope('project')}>{t('Project assets')}</button>
+      </div>}
+      {!conversationView && (view !== 'canvas' || editorLibrary === 'assets') && <WorkspaceFileList key={`${activeRunId}:${view}`} runId={activeRunId} files={sectionFiles} selected={documentFile?.id} title={view === 'context' ? 'Context' : (view === 'assets' || view === 'canvas') ? 'Asset library' : 'References'} scopeLabel={scopeLabel} emptyLabel={view === 'canvas' && canvasAssetScope === 'version' && canvasVersionIds.length > 1 ? 'Select one solution to view its assets.' : undefined} loading={awaitingFinal || (unavailableFinal && versionState.loading) || projectFiles.loading} error={finalScoped && finalSolution?.error ? finalSolution.error : unavailableFinal && !versionState.loading ? t('Final version unavailable') : projectFiles.error} canvasMode={view === 'canvas'} onAddResult={file => { if (activeRunId) { setCanvasAdd({ runId: activeRunId, fileId: file.id, nonce: crypto.randomUUID() }); if (toolPanel.viewportWidth <= 900) setPanelOpen(false); } }} onSelect={file => { if (view === 'canvas') setFileSelection(current => ({ runId: activeRunId, items: { ...(current.runId === activeRunId ? current.items : {}), canvas: file.id } })); else navigate(view, file); }} onRetry={() => { projectFiles.refresh(); if (finalScoped) { refreshVersions(); refreshFinalSolution(); } }} />}
       <div className="tool-panel-resizer" role="separator" tabIndex={0} aria-label={t("Resize tool panel")} aria-orientation="vertical" aria-controls="workbench-tools" aria-valuemin={toolPanel.minWidth} aria-valuemax={Math.round(toolPanel.maxWidth)} aria-valuenow={Math.round(toolPanel.width)} onPointerDown={toolPanel.onPointerDown} onPointerMove={toolPanel.onPointerMove} onPointerUp={toolPanel.stop} onPointerCancel={toolPanel.stop} onLostPointerCapture={toolPanel.stop} onDoubleClick={toolPanel.reset} onKeyDown={event => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();

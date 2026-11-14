@@ -1,14 +1,15 @@
+import { SolutionProgress } from './SolutionProgress';
 import { PROMPT_MIN_SIZE, canvasConnectionIssue, normalizeCanvasEdges, validCanvasConnection } from '@dreamatic/project-data/canvas-graph';
 import { useCanvasHistory } from '../use-canvas-history';
 import { ExternalLink, Flag, Grid3X3, Grip, Hand, LayoutGrid, Minus, MousePointer2, Plus, Scan, Trash2, MessageSquarePlus, LoaderCircle, Undo2, Redo2, MessageSquareText, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { getCanvasState, projectFileUrl, listEditorTasks, submitEditorTask, editorTaskAction, type EditorTask } from '../api';
-import { listSolutionTasks, solutionTaskAction, submitSolutionTask, solutionFileUrl, type SolutionTask, type SolutionVersion } from '../api';
+import { classifySolutionIntent, listSolutionTasks, solutionTaskAction, submitSolutionTask, solutionFileUrl, type SolutionTask, type SolutionVersion } from '../api';
 import { MaterialPrompt, materialTargets } from './MaterialPrompt';
 import { PromptComposer, PromptDialogue } from './PromptDialogue';
-import { promptCommand } from '../prompt-commands';
-import { SolutionPrompt, solutionPromptOptions } from './SolutionPrompt';
+import { operationCommand, promptCommand } from '../prompt-commands';
+import { SolutionPrompt, solutionOperationLabel, solutionPromptOptions } from './SolutionPrompt';
 import { MediaRename } from './MediaRename';
 import { assetUrl } from '../asset-url';
 import { CANVAS_MEDIA_MIME, SOLUTION_MIME, creativeCanvasElements, draggedMedia, mediaKind } from '../canvas-media';
@@ -20,6 +21,7 @@ interface CanvasProps {
   run?: RunView;
   visible: boolean;
   addRequest?: { fileId: string; nonce: string };
+  onSelectVersions?: (ids: string[]) => void;
   onSelectFile: (file: ProjectFile) => void;
   versions?: SolutionVersion[];
   finalVersionId?: string | null;
@@ -44,8 +46,8 @@ function bounds(elements: CanvasElementState[]) {
   return { x, y, width: Math.max(1, ...elements.map(item => item.x + item.width - x)), height: Math.max(1, ...elements.map(item => item.y + item.height - y)) };
 }
 
-export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPreview, onRenamed, versions = [], solutionAdd, onVersionsChanged, finalVersionId, selectingFinal, onSelectFinal, onPreviewSolution }: CanvasProps) {
-  const { t } = useI18n();
+export function Canvas({ files, run, visible, addRequest, onSelectFile, onSelectVersions, onOpenPreview, onRenamed, versions = [], solutionAdd, onVersionsChanged, finalVersionId, selectingFinal, onSelectFinal, onPreviewSolution }: CanvasProps) {
+  const { t, language } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const gesture = useRef<Gesture | undefined>(undefined);
   const handledAdd = useRef<string | undefined>(undefined);
@@ -56,6 +58,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
   const historyRef = useRef(history); historyRef.current = history;
   const [handledTaskIds, setHandledTaskIds] = useState<string[]>([]);
   const handledTasks = useRef(new Set<string>());
+  const [intentChecks, setIntentChecks] = useState<Record<string, { key: string; pending: boolean; candidates: ReturnType<typeof solutionPromptOptions>['eligible'] }>>({});
   const [solutionTasks, setSolutionTasks] = useState<SolutionTask[]>([]);
   const versionsRef = useRef(versions); versionsRef.current = versions;
   const refreshVersionsRef = useRef(onVersionsChanged); refreshVersionsRef.current = onVersionsChanged;
@@ -115,13 +118,16 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
     }).catch(() => { if (!disposed) setLoadError(true); });
     return () => { disposed = true; };
   }, [run?.id, loadAttempt]);
+  useEffect(() => {
+    onSelectVersions?.([...new Set(elements.filter(item => item.kind === 'solution' && item.versionId && selectedIds.includes(item.id)).map(item => item.versionId!))]);
+  }, [elements, selectedIds, onSelectVersions]);
   // A failed restore must never overwrite a historical board with an empty one.
   const state = useMemo<CanvasState | undefined>(() => ready && run ? { version: 1, runId: run.id, updatedAt: new Date().toISOString(), camera, elements, edges, handledTaskIds } : undefined, [camera, elements, edges, handledTaskIds, ready, run?.id]);
   const persistence = useCanvasSave(state, dirty);
   useEffect(() => { if (!visible) { gesture.current = undefined; setSelectionBox(undefined); historyRef.current.end(); setDropActive(false); viewport.current?.querySelectorAll('video').forEach(video => video.pause()); } }, [visible]);
   const mediaFile = (item: CanvasElementState) => currentFiles.find(file => file.id === item.fileId || (file.path && item.assetPath === `runs/${run?.id}/${file.path}`));
   function source(item: CanvasElementState) {
-    return item.fileId && run ? projectFileUrl(run.id, item.fileId) : item.assetPath ? assetUrl(item.assetPath) : undefined;
+    return mediaFile(item)?.url ?? (item.fileId && run ? projectFileUrl(run.id, item.fileId) : item.assetPath ? assetUrl(item.assetPath) : undefined);
   }
   function choose(item: CanvasElementState, multiple = false) {
     setSelectedEdge(undefined);
@@ -136,7 +142,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
     const y = ((clientY ?? rect.top + rect.height / 2) - rect.top - camera.y) / camera.zoom;
     const item: CanvasElementState = {
       id: crypto.randomUUID(), kind, fileId: file.id,
-      ...(file.path ? { assetPath: `runs/${run.id}/${file.path}` } : {}),
+      ...(file.path && !file.versionId ? { assetPath: `runs/${run.id}/${file.path}` } : {}),
       text: file.title, role: file.group, x, y, width: 360, height: 280,
     };
     measured.current.add(item.id);
@@ -361,13 +367,12 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
     [next[first], next[second]] = [next[second]!, next[first]!];
     history.begin(); setEdges(next); history.end(); setDirty(true);
   }
-  async function executeSolution(item: CanvasElementState) {
+  async function executeSolution(item: CanvasElementState, sources: SolutionVersion[], resolution: ReturnType<typeof solutionPromptOptions>) {
     if (!run || submitting.current.has(item.id)) return;
     const id = crypto.randomUUID();
-    const sources = solutionInputs(item);
-    const { operation, outputCount, replacement, canRun } = solutionPromptOptions(item, sources);
+    const { operation, outputCount, replacement, canRun } = resolution;
     const command = promptCommand(item.text ?? '');
-    if (!canRun || !command.prompt || command.error || incoming(item).some(node => node.kind === 'image')) return;
+    if (!operation || !canRun || !command.prompt || command.error || incoming(item).some(node => node.kind === 'image')) return;
     submitting.current.add(item.id);
     updateSolutionPrompt(item, { taskId: id });
     try {
@@ -378,7 +383,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
         sourceNotes: sources.map(version => item.sourceNotes?.[version.id] ?? ''), promptNodeId: item.id,
       });
       setSolutionTasks(current => [...current.filter(entry => entry.id !== id), task]);
-      updateSolutionPrompt(item, { text: '' });
+      updateSolutionPrompt(item, { text: '', operation: undefined, outputCount: undefined, replacement: undefined });
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not start solution edit.'); }
     finally { submitting.current.delete(item.id); }
   }
@@ -438,7 +443,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
     try {
       const task = await submitEditorTask(run.id, { id, source: 'canvas', prompt: command.prompt, originalPrompt: item.text?.trim(), inputIds: [...new Set(inputs.map(node => node.fileId!))], promptNodeId: item.id, upstream: inputs.map(node => ({ nodeId: node.id, fileId: node.fileId!, ...(node.outputTaskId ? { taskId: node.outputTaskId } : {}) })) });
       setTasks(current => [...current.filter(value => value.id !== id), task]);
-      updateSolutionPrompt(item, { text: '' });
+      updateSolutionPrompt(item, { text: '', operation: undefined, outputCount: undefined, replacement: undefined });
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Editor submission failed'); setTasks(current => current.map(task => task.id === id ? { ...task, status: 'failed', error: 'Submission failed. Refresh to check before retrying.' } : task)); }
     finally { submitting.current.delete(item.id); }
   }
@@ -491,7 +496,7 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
           : (item.kind === 'image' || item.kind === 'video') && source(item) ? <figure key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-media ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height }} onPointerDown={event => beginElement(event, item)}>
             <div>{item.kind === 'video' ? <video src={source(item)} controls preload="metadata" onPointerDown={event => { event.stopPropagation(); choose(item, event.shiftKey); }} onLoadedMetadata={event => metadata(item, event.currentTarget.videoWidth, event.currentTarget.videoHeight, event.currentTarget)} onError={() => setNotice('This media could not be loaded. The original file may be missing or unsupported.')} /> : <img draggable={false} src={source(item)} alt={mediaFile(item)?.title ?? item.text ?? item.assetPath?.split('/').at(-1) ?? ''} onLoad={event => metadata(item, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight, event.currentTarget)} onError={() => setNotice('This media could not be loaded. The original file may be missing or unsupported.')} />}</div>
             {ports(item)}
-            <figcaption><span><strong>{mediaFile(item)?.title ?? item.text ?? item.assetPath?.split('/').at(-1)}</strong><small>{t(item.kind === 'video' ? 'Video file' : 'Image file')}</small></span>{run && mediaFile(item) && <MediaRename runId={run.id} file={mediaFile(item)!} onRenamed={onRenamed} onAddResult={file => add(file)} />}<a aria-label={t('Open asset')} href={source(item)} target="_blank" rel="noreferrer" onPointerDown={event => event.stopPropagation()}><ExternalLink size={13} /></a>{item.kind === 'image' && <button type="button" className="canvas-media-delete" aria-label={t('Remove image from canvas')} title={t('Remove image from canvas')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeElement(item.id); }}><Trash2 size={24} /></button>}</figcaption>
+            <figcaption><span><strong>{mediaFile(item)?.title ?? item.text ?? item.assetPath?.split('/').at(-1)}</strong><small>{t(item.kind === 'video' ? 'Video file' : 'Image file')}</small></span>{run && mediaFile(item) && !mediaFile(item)?.versionId && <MediaRename runId={run.id} file={mediaFile(item)!} onRenamed={onRenamed} onAddResult={file => add(file)} />}<a aria-label={t('Open asset')} href={source(item)} target="_blank" rel="noreferrer" onPointerDown={event => event.stopPropagation()}><ExternalLink size={13} /></a>{item.kind === 'image' && <button type="button" className="canvas-media-delete" aria-label={t('Remove image from canvas')} title={t('Remove image from canvas')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeElement(item.id); }}><Trash2 size={24} /></button>}</figcaption>
             {selectedIds.includes(item.id) && <button className="canvas-resize-handle" aria-label={t('Resize selected media')} onPointerDown={event => beginElement(event, item, true)} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); event.stopPropagation(); measured.current.delete(item.id); const factor = ['ArrowLeft', 'ArrowDown'].includes(event.key) ? .9 : 1.1; if (item.width * factor >= 120 && item.height * factor >= 100 && Math.max(item.width, item.height) * factor <= 2400) { setElements(current => current.map(entry => entry.id === item.id ? { ...entry, width: entry.width * factor, height: entry.height * factor } : entry)); setDirty(true); } }} />}
           </figure>
           : item.kind === 'solution' ? (() => {
@@ -534,13 +539,26 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
             const materialTarget = materialVersion && materialTargets(materialVersion, materialFiles).find(target => target.id === item.materialTargetId);
             const validSection = materialVersion?.works?.some(work => work.section === item.materialSection);
             const hasSolution = versionInputs.length > 0;
-            const command = promptCommand(item.text ?? '');
+            const draft = hasSolution && !mixed && item.operation && item.text?.trim() && !item.text.trimStart().startsWith('/')
+              ? { ...item, text: `${operationCommand(item.operation)} ${item.text.trim()}` } : item;
+            const command = promptCommand(draft.text ?? '');
             const commandError = command.error || (command.solutionOnly && !hasSolution ? 'This command needs a solution input.' :
-              command.operation === 'replace' && !command.prompt ? 'Describe how to replace the selected image.' : undefined);
-            const { canRun } = solutionPromptOptions(item, sources);
+              command.operation === 'replace' && !command.prompt ? 'Describe how to replace the selected image.' :
+              command.operation === 'append' && !command.prompt ? 'Describe what to append to the solution.' : undefined);
+            const intentKey = JSON.stringify([run?.id, draft.text, sources.map(source => source.id)]);
+            const check = intentChecks[item.id];
+            const currentCheck = check?.key === intentKey ? check : undefined;
+            const baseResolution = solutionPromptOptions(draft, sources);
+            const choices = currentCheck?.candidates.length
+              ? baseResolution.choices.filter(value => currentCheck.candidates.includes(value)) : baseResolution.choices;
+            const inferredOperation = baseResolution.choices.length > 1 && choices.length === 1 ? choices[0] : undefined;
+            const resolution = inferredOperation ? solutionPromptOptions(draft, sources, inferredOperation)
+              : { ...baseResolution, choices: choices.length ? choices : baseResolution.choices };
+            const canCheckIntent = hasSolution && !mixed && !currentCheck && resolution.choices.length > 0;
+            const { canRun } = resolution;
             const canSend = !busy && !missing && (mixed
               ? Boolean(materialVersion && !invalidMaterial && materialFiles.length && materialFiles.length <= 8 && (materialMode === 'integrate' || materialTarget))
-              : !commandError && Boolean(command.prompt) && (hasSolution ? canRun : inputFiles.length > 0 && mediaInputs.length === imageInputs.length));
+              : !commandError && Boolean(command.prompt) && (hasSolution ? canRun || canCheckIntent : inputFiles.length > 0 && mediaInputs.length === imageInputs.length));
             const task = imageRunning(imageTask?.status) ? imageTask : solutionRunning(solutionTask?.status) ? solutionTask : imageTask ?? solutionTask;
             const transcript = [...tasks.filter(task => task.promptNodeId === item.id || task.id === item.taskId),
               ...solutionTasks.filter(task => task.promptNodeId === item.id || task.id === item.taskId)]
@@ -560,19 +578,47 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
                   setSolutionTasks(current => [...current.filter(entry => entry.id !== id), task]);
                 }).catch(error => setNotice(error instanceof Error ? error.message : 'Could not start solution edit.'))
                   .finally(() => submitting.current.delete(item.id));
-              } else if (hasSolution) void executeSolution(item);
+              } else if (hasSolution && canCheckIntent && run) {
+                setIntentChecks(previous => ({ ...previous, [item.id]: { key: intentKey, pending: true, candidates: [] } }));
+                void classifySolutionIntent(run.id, command.prompt, resolution.choices, sources.map(source => source.title.slice(0, 240)))
+                  .then(response => response.candidates, () => [])
+                  .then(candidates => setIntentChecks(previous => previous[item.id]?.key === intentKey
+                    ? { ...previous, [item.id]: { key: intentKey, pending: false, candidates } } : previous));
+              } else if (hasSolution) void executeSolution(draft, sources, resolution);
               else void submitPrompt(item);
             };
             const action = (value: 'retry' | 'cancel') => {
               if (task && 'parentIds' in task) void changeSolutionTask(task.id, value);
               else if (task) void taskAction(task.id, value);
             };
-            const statusLabel = task && 'parentIds' in task && solutionRunning(task.status)
-              ? task.status === 'waiting' ? 'Waiting for another solution edit' : task.phase === 'images' ? 'Preparing images' : task.phase === 'showcase' ? 'Composing showcase' : 'Planning revision'
-              : task?.status ?? (busy ? 'submitted' : '');
+            const hasDraft = Boolean(draft.text?.trim());
+            const savedSolution = task && 'parentIds' in task ? task : undefined;
+            const operation = hasDraft ? resolution.operation : savedSolution?.operation;
+            const identity = !hasDraft && savedSolution?.materialEdit
+              ? savedSolution.materialEdit.mode === 'replace' ? 'Replace material' : 'Integrate materials'
+              : mixed ? materialMode === 'replace' ? 'Replace material' : 'Integrate materials'
+              : hasDraft && !hasSolution ? 'Edit images'
+              : operation ? solutionOperationLabel(operation)
+              : hasSolution && hasDraft ? 'Operation to confirm'
+              : hasSolution ? 'Solution prompt' : task ? 'Edit images' : 'Prompt';
+            const count = hasDraft ? (resolution.countKnown ? resolution.outputCount : undefined) : savedSolution?.outputCount;
+            const target = hasDraft ? resolution.replacement : savedSolution?.replacement;
+            const title = identity === 'Split solution' && count && count >= 2 && count <= 4
+              ? t('Split into {count} versions').replace('{count}', String(count))
+              : t(identity);
+            const promptText = hasDraft ? command.prompt : task?.originalPrompt ? promptCommand(task.originalPrompt).prompt || task.originalPrompt : task?.prompt;
+            const summary = (savedSolution?.materialEdit && !hasDraft && !savedSolution.originalPrompt ? '' : promptText)?.trim().replace(/\s+/g, ' ');
+            const statusLabel = task?.status ?? (busy ? 'submitted' : '');
             return <article key={item.id} data-element-id={item.id} className={`canvas-artboard canvas-prompt prompt-dialogue ${hasSolution ? 'canvas-solution-prompt' : ''} ${mixed ? 'canvas-material-prompt' : ''} ${selectedIds.includes(item.id) ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height, minWidth: PROMPT_MIN_SIZE.width, minHeight: PROMPT_MIN_SIZE.height }} onPointerDown={event => beginElement(event, item)}>
               {ports(item)}<header className="agent-header">
-                <div><span className="agent-sigil"><MessageSquareText size={15} aria-hidden="true" /></span><strong>{t(mixed ? 'Solution material editor' : 'Prompt')}</strong></div>
+                <div className="prompt-card-heading"><span className="agent-sigil"><MessageSquareText size={15} aria-hidden="true" /></span>
+                  <div className="prompt-card-identity">
+                    <strong title={title}>{title}</strong>
+                    {(summary || (identity === 'Replace image' && target)) && <small title={[identity === 'Replace image' ? target : undefined, summary].filter(Boolean).join(' — ')}>
+                      {[identity === 'Replace image' ? target : undefined, summary].filter(Boolean).join(' — ')}
+                    </small>}
+                  </div>
+                </div>
                 <button aria-label={t('Delete prompt')} onClick={() => removeElement(item.id)}><X size={15} /></button>
               </header>
               <PromptDialogue tasks={transcript} versions={versions} files={currentFiles} runId={run?.id} latestId={task?.id}>
@@ -586,17 +632,34 @@ export function Canvas({ files, run, visible, addRequest, onSelectFile, onOpenPr
                 {!mixed && mediaInputs.length > imageInputs.length && <small role="status">{t('Connect a solution to use a video in its showcase.')}</small>}
                 {missing && <small role="status">{t('A connected solution version is unavailable.')}</small>}
                 {!mixed && inputFiles.length > 0 && <small className="canvas-prompt-inputs" aria-label={t('Input images')}>{inputFiles.map((id, index) => <span key={id}>{t('Image')} {index + 1}: {currentFiles.find(file => file.id === id)?.title ?? id}</span>)}</small>}
-                {hasSolution && !mixed && <SolutionPrompt item={item} sources={sources} busy={busy} update={fields => updateSolutionPrompt(item, fields)} moveInput={index => moveSolutionInput(item, index)} />}
+                {hasSolution && !mixed && <SolutionPrompt item={draft} resolution={{ ...resolution, choices: currentCheck?.pending ? [] : resolution.choices }} sources={sources} busy={busy} update={fields => updateSolutionPrompt(item, fields)} moveInput={index => moveSolutionInput(item, index)} />}
               </PromptDialogue>
               <footer className="composer-wrap">
-                <div className="prompt-dialog-status">
-                  <span role="status" data-task-status={task?.status ?? (busy ? 'submitted' : 'Ready')}>{busy && <LoaderCircle size={12} className="spin" aria-hidden="true" />}{t(statusLabel)}</span>
-                  {task && !busy && ['failed', 'cancelled', 'interrupted'].includes(task.status) && <button onClick={() => action('retry')}>{t('Retry')}</button>}
-                </div>
-                {!mixed && commandError && <small role="alert">{t(commandError)}</small>}
-                {task?.error && <small role="alert">{t(task.error)}</small>}
-                {mixed ? <button type="button" className="material-submit" disabled={busy ? !task : !canSend} onClick={busy ? () => action('cancel') : send}>{t(busy ? 'Cancel' : 'Generate new version')}</button> :
-                <PromptComposer value={item.text ?? ''} busy={busy} canSend={canSend} canStop={Boolean(task && (imageRunning(imageTask?.status) || solutionRunning(solutionTask?.status)))} label={hasSolution ? 'Run solution edit' : 'Generate edit'} update={text => updateSolutionPrompt(item, { text })} send={send} stop={() => action('cancel')} begin={() => history.begin()} end={() => history.end()} />}
+                {(busy || (!hasDraft && task)) && (task && 'parentIds' in task
+                  ? <SolutionProgress task={task} versions={versions} retry={() => action('retry')} cancel={() => action('cancel')} showResults={() => {
+                    const result = document.getElementById(`prompt-results-${task.id}`);
+                    result?.focus({ preventScroll: true });
+                    result?.scrollIntoView({ block: 'nearest' });
+                  }} showDetails={() => {
+                    const details = document.getElementById(`prompt-details-${task.id}`) as HTMLDetailsElement | null;
+                    if (details) { details.open = true; details.querySelector('summary')?.focus({ preventScroll: true }); details.scrollIntoView({ block: 'nearest' }); }
+                  }} />
+                  : <div className="prompt-dialog-status">
+                    <span role="status" data-task-status={task?.status ?? 'submitted'}>{busy && <LoaderCircle size={12} className="spin" aria-hidden="true" />}{t(statusLabel)}</span>
+                    {busy && task ? <button type="button" onClick={() => action('cancel')}>{t('Cancel')}</button>
+                      : task && ['failed', 'cancelled', 'interrupted'].includes(task.status) && <button type="button" onClick={() => action('retry')}>{t('Retry')}</button>}
+                  </div>)}
+                {!busy && <>
+                  {currentCheck?.pending ? <small role="status">{t('Checking the requested operation…')}</small>
+                    : !mixed && commandError ? <small role="alert">{t(commandError)}</small>
+                    : inferredOperation && <small>{t('Suggested command')} {operationCommand(inferredOperation, language === 'zh')}</small>}
+                  {mixed ? <button type="button" className="material-submit" disabled={!canSend} onClick={send}>{t('Generate new version')}</button> :
+                  <PromptComposer commands={hasSolution ? resolution.eligible : inputFiles.length ? ['revise'] : []} value={draft.text ?? ''} canSend={canSend} label={hasSolution ? 'Run solution edit' : 'Generate edit'} update={text => {
+                    setIntentChecks(previous => { const next = { ...previous }; delete next[item.id]; return next; });
+                    updateSolutionPrompt(item, { text, operation: undefined, outputCount: undefined, replacement: undefined });
+                  }} send={send} begin={() => history.begin()} end={() => history.end()} />}
+                </>}
+
               </footer>
               <button className="canvas-resize-handle" aria-label={t('Resize prompt')} onPointerDown={event => beginElement(event, item, true)} />
             </article>;

@@ -6,7 +6,7 @@ import { CANVAS_MEDIA_MIME, mediaKind } from '../canvas-media';
 import { MediaRename } from './MediaRename';
 import { FileListPreview } from './FileListPreview';
 import type { ProjectFile } from '../types';
-export function WorkspaceFileList({ runId, files, selected, title, loading, error, onSelect, onRetry, canvasMode = false, onRenamed, onAddResult }: { runId?: string; files: ProjectFile[]; selected?: string; title: string; loading: boolean; error?: string; onSelect: (file: ProjectFile) => void; onRetry: () => void; canvasMode?: boolean; onRenamed?: () => void; onAddResult?: (file: ProjectFile) => void }) {
+export function WorkspaceFileList({ runId, files, selected, title, scopeLabel, emptyLabel, loading, error, onSelect, onRetry, canvasMode = false, onRenamed, onAddResult }: { runId?: string; files: ProjectFile[]; selected?: string; title: string; scopeLabel?: string; emptyLabel?: string; loading: boolean; error?: string; onSelect: (file: ProjectFile) => void; onRetry: () => void; canvasMode?: boolean; onRenamed?: () => void; onAddResult?: (file: ProjectFile) => void }) {
   const { t } = useI18n();
   const shownFiles = canvasMode ? files.filter(file => mediaKind(file)) : files;
   const groups = [...new Set(shownFiles.map(file => file.group))];
@@ -32,6 +32,7 @@ export function WorkspaceFileList({ runId, files, selected, title, loading, erro
     finally { uploadLock.current = false; if (mounted.current) { setUploading(false); onRetry(); } }
   }
   return <section className={`workspace-files${canvasMode ? ' editor-asset-list' : ''}`}><header className={canvasMode ? 'agent-header library-heading' : 'agent-header'}><strong>{t(title)}{canvasMode && <span>{shownFiles.length}</span>}</strong><button className={canvasMode ? "file-refresh library-icon-button" : "file-refresh"} onClick={onRetry} aria-label={t('Refresh files')}><RefreshCw size={14} /></button></header>
+    {scopeLabel && <p className="workspace-file-scope">{scopeLabel}</p>}
     {canvasMode && <div className="canvas-upload-area">
       <input ref={input} type="file" hidden multiple accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.mp4,.webm,.mov" aria-label={t('Upload media files')} onChange={event => void upload(event.target.files)} />
       <button type="button" className={`canvas-upload-zone${dragOverUpload ? ' drag-over' : ''}`} aria-label={t('Upload media')} aria-disabled={!runId || uploading} aria-busy={uploading} onClick={() => { if (runId && !uploadLock.current) input.current?.click(); }}
@@ -58,14 +59,14 @@ export function WorkspaceFileList({ runId, files, selected, title, loading, erro
     <div className="workspace-file-scroll">
     {loading && <p role="status">{t('Loading files…')}</p>}
     {error && <p role="alert">{t('Could not load project files')}<small>{error}</small><button onClick={onRetry}>{t('Retry')}</button></p>}
-    {!loading && !error && !shownFiles.length && <p>{t('No files in this section yet')}</p>}
+    {!loading && !error && !shownFiles.length && <p>{t(emptyLabel ?? 'No files in this section yet')}</p>}
     {groups.map(group => <section className="workspace-file-group" key={group}><h3>{t(group)}</h3>{shownFiles.filter(file => file.group === group).map(file => {
       const draggable = Boolean(canvasMode && runId && mediaKind(file));
       return <div className="workspace-file-row" key={file.id}><button className={`workspace-file-item${selected === file.id ? ' selected' : ''}${draggable ? ' draggable-media' : ''}`} draggable={draggable} onDragStart={event => {
         if (!draggable || !runId) { event.preventDefault(); return; }
         event.dataTransfer.setData(CANVAS_MEDIA_MIME, JSON.stringify({ runId, fileId: file.id }));
         event.dataTransfer.effectAllowed = 'copy';
-      }} aria-pressed={selected === file.id} onClick={() => onSelect(file)}><FileListPreview file={file} runId={runId} /><span className="workspace-file-label"><strong>{file.title}</strong><small title={canvasMode ? file.path : undefined}>{canvasMode ? file.kind.toUpperCase() : file.path ?? file.url ?? file.kind.toUpperCase()}</small></span>{file.url && <ExternalLink size={12} />}</button>{draggable && runId && <MediaRename runId={runId} file={file} onRenamed={onRenamed ?? onRetry} onAddResult={onAddResult} />}</div>;
+      }} aria-pressed={selected === file.id} onClick={() => onSelect(file)}><FileListPreview file={file} runId={runId} /><span className="workspace-file-label"><strong>{file.category === 'context' && file.versionId ? t(file.title) : file.title}</strong><small title={canvasMode ? file.path : undefined}>{canvasMode ? file.kind.toUpperCase() : file.path ?? file.url ?? file.kind.toUpperCase()}</small></span>{file.url && <ExternalLink size={12} />}</button>{draggable && runId && !file.versionId && <MediaRename runId={runId} file={file} onRenamed={onRenamed ?? onRetry} onAddResult={onAddResult} />}</div>;
     })}</section>)}
   </div></section>;
 }

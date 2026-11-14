@@ -4,9 +4,10 @@ import { join } from 'node:path';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { modelCapabilities } from '@dreamatic/project-data';
 import { CONFIG_FIELDS } from './config-store.js';
+import { observeModelHttpStream } from './model-http-stream.js';
 
 /** Shared Pi lifecycle/provider setup for design specialists and Editor. */
-export async function createDreamaticAgent(options: { root: string; role: AgentRole; systemPrompt: string; repoRoot?: string; tools: ToolDefinition[]; textOnly?: boolean; env?: NodeJS.ProcessEnv; skillRequest?: string }) {
+export async function createDreamaticAgent(options: { root: string; role: AgentRole; systemPrompt: string; repoRoot?: string; tools: ToolDefinition[]; textOnly?: boolean; env?: NodeJS.ProcessEnv; skillRequest?: string; observeHttpStream?: boolean }) {
   const env = options.env ?? process.env;
   const setting = (key: string) => env[key]?.trim() || CONFIG_FIELDS.find(field => field.key === key)?.defaultValue || '';
   const settings = SettingsManager.inMemory();
@@ -18,6 +19,11 @@ export async function createDreamaticAgent(options: { root: string; role: AgentR
     systemPrompt: options.systemPrompt + skillPolicy });
   await loader.reload();
   const runtime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+  const httpStream = options.observeHttpStream ? observeModelHttpStream() : undefined;
+  if (httpStream) {
+    const stream = runtime.streamSimple.bind(runtime);
+    runtime.streamSimple = (model, context, options) => stream(model, context, { ...options, fetch: httpStream.fetch });
+  }
   const id = setting(`DREAMATIC_MODEL_${options.role.toUpperCase()}`) || setting('DREAMATIC_MODEL');
   if (!id || !setting('DREAMATIC_BASE_URL') || !setting('DREAMATIC_API_KEY')) throw new Error('Configure reasoning provider, model and API key in System Settings');
   const caps = modelCapabilities(id), modelInfo = runtime.getModels().find(model => model.id === id);
@@ -38,5 +44,5 @@ export async function createDreamaticAgent(options: { root: string; role: AgentR
     // Use the public Pi API; native command expansion would bypass our hash/audit checks.
     return created.session.prompt(knowledge + text, { ...promptOptions, expandPromptTemplates: false });
   };
-  return { ...created, skillCatalog: catalog, prompt };
+  return { ...created, skillCatalog: catalog, prompt, httpStream };
 }

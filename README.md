@@ -1,6 +1,6 @@
 # Dreamatic · Art
 
-**Preparing for v2.4.0**
+**v2.4.1**
 
 Dreamatic · Art is an open-source, local-first AI design workbench for web and desktop. It turns a brief into research, design proposals, generated visuals, and static showcase pages. Project files and generated work live in a local workspace.
 
@@ -10,7 +10,15 @@ Dreamatic · Art is an open-source, local-first AI design workbench for web and 
 
 *The final solution in Preview, shown with the Still Light demo project.*
 
-## What's new for v2.4.0
+## What's new in v2.4.1
+
+- **Append-only editing.** Add content and new images while preserving the original design and media. Reused images inherit their source prompts and dimensions across revisions, fusion, and split outputs.
+- **Faster revisions.** Single-image replacement submits only the target editing instruction and can reuse a validated showcase layout. Accepted plans proceed directly to image processing, reducing model calls and repeated context.
+- **Intent-aware prompt cards.** Cards infer revise, append, recompose, fuse, split, or replace operations and ask for clarification when needed. Type `/` to choose from contextual commands. Card titles, instruction summaries, live progress, and dedicated cancel controls make tasks easier to follow.
+- **Version-scoped context and assets.** Context and the asset library follow the final solution. In the Solution Editor, selecting a solution card shows its media; version references follow assets into subsequent edits. Shared project materials remain accessible.
+- **Clearer questions and diagnostics.** The brief workflow asks about missing information that would significantly change the design or deliverables, with up to ten questions per card. Revision planning can retry once after a streaming idle timeout, and saved activity includes stream diagnostics and submission errors.
+
+## Workbench features
 
 - **Versioned Solution Editor.** Drag a version onto the canvas and connect it to a prompt card to revise, combine, or branch designs. Each version keeps its own design document, showcase, and media, with links to its source versions.
 - **Media integration.** Connect images or videos alongside a solution, then choose where to add them or select an existing asset to replace. The editor saves the result as a new version.

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { basename, join } from 'node:path';
 import { imageDimensions } from './image-edit-size.js';
 import { imageBytesKind } from './image-edit.js';
-import { projectFileContent, projectFiles } from './project-files.js';
+import { projectFileContent, projectMediaCatalog } from './project-files.js';
 import { composeSolutionShowcase } from './solution-showcase.js';
 import { readSolutionFile, solutionWorks, type SolutionVersion } from './solution-versions.js';
 import type { GeneratedShowcaseImage } from './showcase.js';
@@ -61,7 +61,7 @@ export async function snapshotMaterials(workspace: string, parent: SolutionVersi
   const imageTarget = parent.images.some(image => image.id === edit.targetId);
   const videoTarget = parent.videos?.some(video => video.id === edit.targetId);
   if (edit.mode === 'replace' && !imageTarget && !videoTarget) throw new Error('The selected material is missing from this solution version.');
-  const catalog = await projectFiles(workspace, parent.runId);
+  const catalog = await projectMediaCatalog(workspace, parent.runId, edit.fileIds);
   const folder = await mkdtemp(join(directory, '.materials-'));
   try {
     const files: MaterialFile[] = [];

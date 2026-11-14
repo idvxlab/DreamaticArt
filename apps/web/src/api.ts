@@ -1,4 +1,4 @@
-import type { EditAttempt } from '@dreamatic/project-data';
+import type { EditAttempt, SolutionImageProgress } from '@dreamatic/project-data';
 import type { AgentSession, Asset, CanvasState, RunView, SessionView, WorkflowEvent } from "./types";
 
 async function parse<T>(response: Response): Promise<T> {
@@ -357,7 +357,7 @@ export interface SolutionTaskInput {
   parentIds: string[];
   prompt: string;
   originalPrompt?: string;
-  operation: 'revise' | 'recompose' | 'replace' | 'fuse' | 'split';
+  operation: 'revise' | 'append' | 'recompose' | 'replace' | 'fuse' | 'split';
   outputCount: number;
   replacement?: string;
   sourceNotes: string[];
@@ -371,6 +371,7 @@ export interface SolutionTask extends SolutionTaskInput {
   status: 'waiting' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
   phase?: string;
   completed?: number;
+  imageProgress?: SolutionImageProgress;
   error?: string;
 }
 
@@ -382,6 +383,11 @@ export const selectFinalSolution = async (runId: string, versionId: string) =>
   parse<{ versionId: string }>(await fetch(solutionEndpoint(runId, 'final-solution'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId }) }));
 export const solutionFileUrl = (version: SolutionVersion, path: string) =>
   solutionEndpoint(version.runId, `versions/${encodeURIComponent(version.id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`);
+export const classifySolutionIntent = async (runId: string, prompt: string, candidates: SolutionTaskInput['operation'][], sources: string[]) =>
+  parse<{ candidates: SolutionTaskInput['operation'][] }>(await fetch(solutionEndpoint(runId, 'solution-intent'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, candidates, sources }),
+    signal: AbortSignal.timeout(15000),
+  }));
 export const listSolutionTasks = async (runId: string) => parse<SolutionTask[]>(await fetch(solutionEndpoint(runId, 'solution-tasks')));
 export const submitSolutionTask = async (runId: string, input: SolutionTaskInput) =>
   parse<SolutionTask>(await fetch(solutionEndpoint(runId, 'solution-tasks'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }));

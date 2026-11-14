@@ -18,3 +18,8 @@ export interface EditAttempt {
   reportedCalls: number;
   unreportedCalls: number;
 }
+
+export interface SolutionImageProgress {
+  totals: Record<'reuse' | 'edit' | 'generate', number>;
+  completed: Record<'reuse' | 'edit' | 'generate', number>;
+}

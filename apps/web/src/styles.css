@@ -919,8 +919,8 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .canvas-prompt footer small { flex-basis: 100%; max-height: 55px; overflow: auto; }
 .canvas-prompt button:not(.canvas-port):not(.canvas-resize-handle) { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; background: #e4d9ef; padding: 5px 7px; color: #594375; cursor: pointer; }
 .canvas-prompt button:disabled { opacity: .45; cursor: default; }
-.canvas-prompt .canvas-port { border-color: #9a80b4; }
-.canvas-edge-endpoint { position: absolute; z-index: 4; width: 14px; height: 14px; border: 2px solid #497848; border-radius: 50%; padding: 0; background: white; cursor: crosshair; }
+.canvas-prompt .canvas-port { z-index: 4; border-color: #9a80b4; }
+.canvas-edge-endpoint { position: absolute; z-index: 5; width: 14px; height: 14px; border: 2px solid #497848; border-radius: 50%; padding: 0; background: white; cursor: crosshair; }
 
 .canvas-prompt-inputs span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -1184,7 +1184,7 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .canvas-solution-prompt footer { align-content: start; max-height: 76%; overflow: auto; }
 .canvas-solution-prompt footer label { display: flex; align-items: center; gap: 5px; }
 .canvas-solution-prompt select, .canvas-solution-prompt input { min-width: 0; border: 1px solid #d8cde6; border-radius: 4px; background: #fcfaff; color: #3e354d; padding: 4px; font: inherit; }
-.solution-inputs { flex-basis: 100%; margin: 0; padding-left: 20px; max-height: 90px; overflow: auto; }
+.solution-inputs { flex-basis: 100%; margin: 0; padding: 0; list-style: none; max-height: 90px; overflow: auto; }
 .solution-inputs li { padding-bottom: 3px; }
 .solution-inputs li > span { display: inline-block; max-width: 40%; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; vertical-align: middle; margin-right: 5px; }
 
@@ -1284,8 +1284,8 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .canvas-prompt .prompt-composer-actions { justify-content: space-between; padding: 2px 5px 5px; }
 .canvas-prompt .prompt-composer .send { background: #292a25; color: #fffefb; display: grid; padding: 0; place-items: center; }
 .prompt-command-menu { position: relative; }
-.prompt-command-menu > summary { display: grid; width: 28px; height: 28px; place-items: center; cursor: pointer; border-radius: 5px; }
-.prompt-command-menu[open] > div { position: absolute; z-index: 3; bottom: 100%; left: 0; display: grid; gap: 3px; width: max-content; padding: 5px; border: 1px solid #dcdfd3; border-radius: 7px; background: #fffefa; box-shadow: 0 6px 16px #25262022; }
+.prompt-command-menu > button { display: grid; width: 28px; height: 28px; place-items: center; cursor: pointer; border-radius: 5px; }
+.prompt-command-options { position: absolute; z-index: 3; bottom: 100%; left: 0; display: grid; gap: 3px; width: max-content; padding: 5px; border: 1px solid #dcdfd3; border-radius: 7px; background: #fffefa; box-shadow: 0 6px 16px #25262022; }
 
 @container prompt-card (min-width: 620px) {
   .canvas-artboard.prompt-dialogue > .prompt-dialog-body {
@@ -1353,3 +1353,35 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .material-target-grid :is(strong, small) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .material-target-check { position: absolute; top: 3px; right: 3px; padding: 2px; border-radius: 50%; background: #485b36; color: white; }
 .material-replacement-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 6px 8px; border-radius: 5px; background: #e9eee2; overflow-wrap: anywhere; }
+
+.prompt-command-options .is-active { background: #ece8f7; }
+.prompt-operation-choices { display: flex; flex-wrap: wrap; gap: 5px; border: 0; padding: 0; }
+
+.solution-progress { display: grid; gap: 5px; padding: 6px 0; border-top: 1px solid #dcdfd3; }
+.solution-progress strong { font-size: 12px; }
+.solution-progress-stages, .solution-progress-meta { display: flex; flex-wrap: wrap; gap: 3px 10px; margin: 0; padding: 0; }
+.solution-progress-stages { list-style: none; font-size: 11px; }
+.solution-progress-stages li { display: inline-flex; gap: 4px; color: #606658; }
+.solution-progress-stages [data-state="current"] { font-weight: 650; color: #292a25; }
+.solution-progress-stages [data-state="done"] span { color: #4e6842; }
+.solution-progress-meta:empty { display: none; }
+.solution-progress-meta a { overflow-wrap: anywhere; }
+.solution-progress-current-image { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+@media (prefers-reduced-motion: reduce) { .solution-progress .spin { animation: none; } }
+
+.prompt-card-heading, .prompt-card-identity { min-width: 0; }
+.prompt-card-identity { display: grid; gap: 2px; }
+.prompt-card-identity > :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-card-identity small { color: #60695a; font-size: 12px; }
+.prompt-source-role { display: block; color: #60695a; }
+.prompt-submitted-inputs ul { list-style: none; margin-block: 4px; padding: 0; }
+.prompt-submitted-inputs ul li + li { margin-top: 4px; }
+
+.prompt-footer-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+.prompt-footer-actions > :last-child { margin-inline-start: auto; }
+.prompt-task-error { color: #894b34; overflow-wrap: anywhere; }
+.solution-progress .prompt-dialog-status { flex-wrap: wrap; }
+.solution-progress .prompt-dialog-status > :is(span, small) { flex-shrink: 0; white-space: nowrap; }
+.solution-progress .prompt-dialog-status > span { max-width: 100%; min-width: 0; }
+.solution-progress .prompt-dialog-status strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-file-scope { margin: 0; padding: 6px 16px; color: var(--muted); overflow-wrap: anywhere; font-size: 12px; }

@@ -1,3 +1,4 @@
+import { findSolutionVersion, readSolutionFile } from './solution-versions.js';
 import { readFile, readdir, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { extname, join, relative, resolve, sep } from 'node:path';
@@ -141,7 +142,39 @@ export async function projectFiles(workspace: string, id: string): Promise<Proje
   }
   return files.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
+async function versionMedia(workspace: string, runId: string, id: string): Promise<(ProjectFile & { versionId: string; path: string }) | undefined> {
+  const ref = /^version:([a-f0-9]{64}):(.+)$/u.exec(id);
+  if (!ref) return;
+  const version = await findSolutionVersion(workspace, runId, ref[1]!);
+  const file = [...(version?.images ?? []), ...(version?.videos ?? [])].find(file => file.path === ref[2]);
+  if (!version || !file) return;
+  return {
+    id, versionId: version.id, path: file.path, title: 'title' in file && typeof file.title === 'string' ? file.title : file.id,
+    kind: extname(file.path).slice(1).toLowerCase(), category: 'assets', group: version.title,
+  };
+}
+
+export async function projectMediaCatalog(workspace: string, runId: string, ids: string[]) {
+  const catalog = await projectFiles(workspace, runId);
+  const versionIds = [...new Set(ids.filter(id => id.startsWith('version:')))];
+  const media = await Promise.all(versionIds.map(async id => {
+    try { return await versionMedia(workspace, runId, id); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }));
+  return [...catalog, ...media.filter(file => file !== undefined)];
+}
+
 export async function projectFileContent(workspace: string, id: string, fileId: string): Promise<{ data: Buffer; kind: string; filename: string }> {
+  if (fileId.startsWith('version:')) {
+    const file = await versionMedia(workspace, id, fileId);
+    if (!file) throw new Error('Version media not found');
+    const { bytes } = await readSolutionFile(workspace, id, file.versionId, file.path);
+    if (bytes.length > 100 * 1024 * 1024) throw new Error('Version media exceeds 100 MB.');
+    return { data: bytes, kind: file.kind, filename: file.path.split('/').at(-1)! };
+  }
   const root = await rootPath(workspace, id);
   const catalog = await projectFiles(workspace, id);
   const file = catalog.find(file => file.id === fileId && file.kind !== 'web');

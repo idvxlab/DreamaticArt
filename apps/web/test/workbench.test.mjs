@@ -407,14 +407,14 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await newPrompt.click();
   await fit.click();
   const fusionPrompt = page.locator('.canvas-solution-prompt').first();
-  assert.equal(await fusionPrompt.getByLabel('Operation').inputValue(), '');
+  assert.equal(await fusionPrompt.getByLabel('Operation').count(), 0);
   const edge = page.locator('.canvas-connections [data-edge-id]').last();
   await edge.press('Delete');
   const promptCard = page.locator('.canvas-prompt').last();
   const inputPort = promptCard.locator('[data-port-side="left"]');
-  async function connect(source) {
+  async function connect(source, target = inputPort) {
     const from = await source.locator('[data-port-side="right"]').boundingBox();
-    const to = await inputPort.boundingBox();
+    const to = await target.boundingBox();
     await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
     await page.mouse.down();
     await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
@@ -426,8 +426,8 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.getByText('These cards are already connected.', { exact: true }).waitFor();
   await connect(cards.filter({ hasText: 'Second study' }));
   assert.equal(await page.getByText('These cards are already connected.', { exact: true }).count(), 0);
-  assert.match(await fusionPrompt.getByLabel('Operation').locator('option:checked').textContent(), /Fuse solutions/);
   await fusionPrompt.getByLabel('Move source up').click();
+  assert.match(await fusionPrompt.getByLabel('Input versions').locator('li').first().textContent(), /Primary solution.*Second study/);
   await fusionPrompt.getByLabel('Source role 1', { exact: true }).fill('Primary layout');
   await fusionPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).fill('Combine the two concepts');
   const imageCard = page.locator('.canvas-media:not(.canvas-solution)').filter({ has: page.locator('[data-port-side="right"]') }).first();
@@ -447,17 +447,25 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await fit.click();
   const splitPrompt = page.locator('.canvas-solution-prompt').last();
   await splitPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).fill('/split 2 Independent directions');
-  assert.match(await splitPrompt.getByLabel('Operation').locator('option:checked').textContent(), /Split solution/);
+  assert.equal(await splitPrompt.locator('header strong').textContent(), 'Split into 2 versions');
+  assert.match(await splitPrompt.getByLabel('Input versions').textContent(), /Based on.*Fusion/);
   await splitPrompt.getByRole('textbox', { name: 'Edit prompt', exact: true }).press('Enter');
   await splitPrompt.getByText('Waiting for another solution edit').waitFor();
+  assert.equal(await splitPrompt.locator('textarea').count(), 0);
+  assert.equal(await splitPrompt.getByRole('button', { name: 'Cancel' }).isVisible(), true);
   const liveTask = solutionTasks[1];
   liveTask.status = 'running';
-  liveTask.phase = 'showcase';
+  liveTask.phase = 'images';
+  liveTask.completed = 1;
+  liveTask.imageProgress = { totals: { reuse: 4, edit: 0, generate: 3 }, completed: { reuse: 4, edit: 0, generate: 1 } };
   liveTask.activity = [{
     number: 1, submittedAt: liveTask.createdAt, startedAt: liveTask.createdAt,
     reportedCalls: 0, reportedTokens: 0, unreportedCalls: 0,
     events: [{ at: liveTask.createdAt, actor: 'builder', label: 'Agent execution', state: 'started' }],
   }];
+  await splitPrompt.locator('.solution-progress').getByText('Generated images 1/3').waitFor();
+  assert.match(await splitPrompt.locator('.solution-progress').textContent(), /Solution version 2\/2/);
+  await splitPrompt.getByRole('button', { name: 'View execution details' }).click();
   await splitPrompt.locator('.prompt-activity').getByText('Agent execution', { exact: false }).waitFor();
   for (let retry = 0; retry < 50 && !persisted?.elements.some(item => item.taskId === liveTask.id); retry++) {
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -466,6 +474,9 @@ test('six workbench views preserve conversation, canvas and project isolation an
   await page.reload();
   await page.locator('.project-select').filter({ hasText: 'Project A' }).click();
   await nav('Solution editor').click();
+  await splitPrompt.locator('.solution-progress').getByText('Generated images 1/3').waitFor();
+  assert.match(await splitPrompt.locator('.solution-progress').textContent(), /Solution version 2\/2/);
+  await splitPrompt.getByRole('button', { name: 'View execution details' }).click();
   await splitPrompt.locator('.prompt-activity').getByText('Agent execution', { exact: false }).waitFor();
   await fit.click();
 
@@ -503,10 +514,12 @@ test('six workbench views preserve conversation, canvas and project isolation an
   assert.match(await executionSummary.textContent(), /Reported tokens42/);
   assert.match(await executionSummary.textContent(), /Some calls did not report token usage/);
   assert.equal(await page.locator('.canvas-connections path').count(), persisted.edges.length);
+  await page.getByRole('button', { name: 'Reflow project cards' }).click();
   await fit.click();
   await page.screenshot({ animations: 'disabled', path: '/tmp/dreamatic-solution-editor.png' });
-  await connect(page.locator('.canvas-media:not(.canvas-solution)').filter({ hasText: 'Design image' }).first());
+  await connect(page.locator('.canvas-media:not(.canvas-solution)').filter({ hasText: 'Design image' }).first(), restoredConversation.locator('[data-port-side="left"]'));
   const materialCard = page.locator('.canvas-material-prompt').last();
+  await materialCard.waitFor();
   assert.equal(await materialCard.locator('textarea').count(), 0);
   await materialCard.getByRole('button', { name: 'Replace material', exact: true }).click();
   const generate = materialCard.getByRole('button', { name: 'Generate new version', exact: true });
@@ -520,6 +533,20 @@ test('six workbench views preserve conversation, canvas and project isolation an
   const secondVersion = library.locator('article').filter({ has: page.locator('strong').filter({ hasText: /^Second study$/ }) });
   await firstVersion.getByRole('button', { name: 'Set as final' }).click();
   await cards.filter({ hasText: 'First study' }).getByText('Final solution', { exact: true }).waitFor();
+  await nav('Context').click();
+  await page.locator('.workspace-file-scope').getByText('First study').waitFor();
+  await page.locator('.workspace-file-list, .workspace-files').getByText('Design document', { exact: true }).click();
+  await nav('Asset library').click();
+  await page.locator('.workspace-files img').first().waitFor();
+  assert.match(await page.locator('.workspace-files img').first().getAttribute('src'), new RegExp('/versions/' + initialVersions[0].id));
+  await nav('Solution editor').click();
+  await fit.click();
+  await cards.filter({ hasText: 'Second study' }).click({ position: { x: 15, y: 15 } });
+  await librarySwitch.getByRole('button', { name: 'Assets', exact: true }).click();
+  await page.locator('.workspace-file-scope').getByText('Second study').waitFor();
+  assert.match(await page.locator('.workspace-files img').first().getAttribute('src'), new RegExp('/versions/' + initialVersions[1].id));
+  await librarySwitch.getByRole('button', { name: 'Versions', exact: true }).click();
+
   await secondVersion.getByRole('button', { name: 'Preview' }).click();
   const frame = page.frameLocator('.showcase-view iframe');
   await frame.getByRole('heading', { name: 'Second study' }).waitFor();

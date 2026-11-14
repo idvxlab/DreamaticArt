@@ -18,7 +18,7 @@ export interface CanvasElementState {
   taskId?: string;
   outputTaskId?: string;
   versionId?: string;
-  operation?: "revise" | "recompose" | "replace" | "fuse" | "split";
+  operation?: "revise" | "append" | "recompose" | "replace" | "fuse" | "split";
   outputCount?: number;
   replacement?: string;
   materialMode?: "integrate" | "replace";
@@ -64,7 +64,7 @@ export function normalizeCanvasState(runId: string, value: unknown): CanvasState
       width: Math.max((item.kind === "prompt" || item.kind === "solution-prompt") ? PROMPT_MIN_SIZE.width : 80, Math.min(2400, finite(item.width, 320))),
       height: Math.max((item.kind === "prompt" || item.kind === "solution-prompt") ? PROMPT_MIN_SIZE.height : 40, Math.min(2400, finite(item.height, 220))),
       ...(typeof item.versionId === "string" && /^[a-f0-9]{64}$/u.test(item.versionId) ? { versionId: item.versionId } : {}),
-      ...(["revise", "recompose", "replace", "fuse", "split"].includes(String(item.operation)) ? { operation: item.operation as NonNullable<CanvasElementState["operation"]> } : {}),
+      ...(["revise", "append", "recompose", "replace", "fuse", "split"].includes(String(item.operation)) ? { operation: item.operation as NonNullable<CanvasElementState["operation"]> } : {}),
       ...(typeof item.outputCount === "number" && Number.isInteger(item.outputCount) && item.outputCount >= 2 && item.outputCount <= 4 ? { outputCount: item.outputCount } : {}),
       ...(item.materialMode === "integrate" || item.materialMode === "replace" ? { materialMode: item.materialMode as "integrate" | "replace" } : {}),
       ...(typeof item.materialSection === "string" ? { materialSection: item.materialSection.slice(0, 200) } : {}),

@@ -36,7 +36,7 @@ export function FileListPreview({ file, runId }: { file: ProjectFile; runId?: st
   const kind = file.kind.toLowerCase().replace(/^\./u, '');
   const { icon: Icon, label } = appearances[kind] ?? { icon: File, label: 'Other file' };
   const [failed, setFailed] = useState<string>();
-  let source = imageUrl(file.thumbnailUrl);
+  let source = imageUrl(file.thumbnailUrl ?? (file.versionId ? file.url : undefined));
   if (!source && /^(png|jpe?g|webp|gif|svg)$/u.test(kind)) {
     if (runId && file.path) source = assetUrl(`runs/${runId}/${file.path}`);
     else if (runId && !file.url) source = projectFileUrl(runId, file.id);

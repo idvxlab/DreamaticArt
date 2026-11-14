@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { CONFIG_FIELDS } from './config-store.js';
 import { requestImage } from './image-request.js';
 import { imageSlot } from './image-slots.js';
-import { projectFileContent, projectFiles } from './project-files.js';
+import { projectFileContent, projectMediaCatalog } from './project-files.js';
 import { projectInputDirectory, storeProjectMedia } from './media-upload.js';
 
 function setting(env: NodeJS.ProcessEnv, key: string) {
@@ -41,7 +41,7 @@ export async function editProjectImage(workspace: string, runId: string, fileId:
   const config = imageEditSettings(env);
   if (!config.enabled) throw new Error('Image editing is disabled in Settings.');
   if (!config.configured) throw new Error('Configure an image API key in Settings before editing images.');
-  const catalog = await projectFiles(workspace, runId);
+  const catalog = await projectMediaCatalog(workspace, runId, sourceIds);
   const files = sourceIds.map(id => {
     const file = catalog.find(file => file.id === id && file.category === 'assets' && /^(png|jpe?g|webp)$/u.test(file.kind));
     if (!file) throw new Error('Image editing supports project PNG, JPEG and WebP images only.');

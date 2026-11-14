@@ -1,10 +1,11 @@
+import type { SolutionImageProgress } from '@dreamatic/project-data';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { Type } from 'typebox';
 import { createDreamaticAgent } from './agent-session.js';
 import { bindFusionCitations, fusionCitationDirectory } from './design-citations.js';
-import { dimensions, plannedImages } from './design-images.js';
+import { dimensions, imageSections, plannedImages } from './design-images.js';
 import { imageCapabilityInfo, setting } from './design-pipeline.js';
 import { imageBytesKind, imageEditSettings } from './image-edit.js';
 import { planImageEdit } from './image-edit-plan.js';
@@ -12,52 +13,138 @@ import { imageDimensions } from './image-edit-size.js';
 import { requestImage, retryImage } from './image-request.js';
 import { imageSlot } from './image-slots.js';
 import { imageActivityUsage, type EditActivityReporter } from './edit-activity.js';
-import { promptSolutionModel } from './solution-model.js';
+import { promptSolutionModel, SolutionModelTimeout } from './solution-model.js';
 import { includeVersionVideos } from './solution-materials.js';
 import { composeSolutionShowcase } from './solution-showcase.js';
 import { readSolutionFile, type SolutionDelivery, type SolutionVersion } from './solution-versions.js';
 import type { GeneratedShowcaseImage } from './showcase.js';
+import { validateShowcaseDirection, validateShowcaseHtml, validateVersionShowcaseResources } from './showcase.js';
 
-export type SolutionOperation = 'revise' | 'fuse' | 'split' | 'replace' | 'recompose';
+export type SolutionOperation = 'revise' | 'append' | 'fuse' | 'split' | 'replace' | 'recompose';
 
 type ImageAction = { id: string; action: 'reuse' | 'edit' | 'generate'; source?: number; imageId?: string };
 interface OutputPlan { design: string; assets: ImageAction[] }
 interface Material { version: SolutionVersion; design: string; exhibition: string }
 interface SourceImage { source: number; image: ReturnType<typeof plannedImages>[number] }
 
-function validatePlans(value: unknown, sources: Material[], inventory: Map<string, SourceImage>, count: number, canEditImages: boolean, replacement?: string): OutputPlan[] {
-  if (!Array.isArray(value) || value.length !== count) throw new Error('The plan must contain the requested number of outputs');
-  return value.map(raw => {
-    if (!raw || typeof raw.design !== 'string' || !Array.isArray(raw.assets)) throw new Error('Invalid solution output plan');
-    const images = plannedImages(raw.design);
-    const submitted = raw.assets as Array<{ id?: string; action?: string; sourceRef?: string }>;
-    if (images.length !== submitted.length || new Set(submitted.map(asset => asset?.id)).size !== images.length) {
-      throw new Error('Each planned image requires one asset action with a distinct output image ID.');
+const appendedPlanSchema = Type.Object({
+  additions: Type.String(),
+  images: Type.Array(Type.Object({
+    id: Type.String({ pattern: '^[a-zA-Z0-9_-]+$' }),
+    introduction: Type.String(), prompt: Type.String(), size: Type.String(),
+  })),
+});
+
+function appendPlan(source: Material, plan: import('typebox').Static<typeof appendedPlanSchema>): OutputPlan {
+  const originalImages = plannedImages(source.design);
+  const ids = new Set([...originalImages.map(image => image.id), ...(source.version.videos ?? []).map(video => video.id)]);
+  const additions = plan.additions.split('\n').map((line, index) => {
+    const normalized = line.replace(/^( {0,3})#(?=[ \t])/u, '$1##');
+    if (/^ {0,3}##[ \t]+Image:/u.test(normalized)) {
+      throw new Error(`additions line ${index + 1} uses the reserved heading "## Image:". Move the new image specification to images.`);
     }
-    const assets = images.map((image): ImageAction => {
-      const asset = submitted.find(entry => entry?.id === image.id);
-      if (!asset || !['reuse', 'edit', 'generate'].includes(asset.action ?? '')) throw new Error(`Missing or invalid action for output image "${image.id}".`);
-      if (asset.action === 'generate') {
-        if (asset.sourceRef !== undefined) throw new Error(`Generated image "${image.id}" must omit sourceRef.`);
-        return { id: image.id, action: 'generate' };
+    if (/^ {0,3}##[ \t]+Showcase videos(?:[ \t]+#+)?\s*$/u.test(normalized)) {
+      throw new Error(`additions line ${index + 1} uses the reserved heading "## Showcase videos". Remove that heading; the server carries forward existing videos.`);
+    }
+    return normalized;
+  }).join('\n').replace(/^(?:[^\S\n]*\n)+/u, '').trimEnd();
+  if (!additions && !plan.images.length) throw new Error('Submit at least one addition.');
+  const [maxWidth, maxHeight] = dimensions(setting('DREAMATIC_IMAGE_DEFAULT_SIZE'));
+  const sections = plan.images.map(({ id, introduction, prompt, size }) => {
+    if (ids.has(id)) throw new Error(`New image ID "${id}" is already in use.`);
+    ids.add(id);
+    const [width, height] = dimensions(size);
+    if (width > maxWidth || height > maxHeight) throw new Error(`Planned image exceeds the configured size budget: ${id}`);
+    return `## Image: ${id}\n### Introduction\n${introduction.trim()}\n### Prompt\n${prompt.trim()}\n### Size\n${size.trim()}`;
+  });
+  const design = `${source.design}\n\n## Additions\n\n${[additions, ...sections].filter(Boolean).join('\n\n')}\n`;
+  const combined = plannedImages(design);
+  if (combined.length !== originalImages.length + plan.images.length || plan.images.some(({ id, prompt, size, introduction }, index) => {
+    const image = combined[originalImages.length + index];
+    return image?.id !== id || image.prompt !== prompt.trim() || image.size !== size.trim() || image.introduction !== introduction.trim();
+  })) throw new Error('New image fields must contain plain content without Markdown headings.');
+  return {
+    design, assets: [
+      ...source.version.images.map(({ id }): ImageAction => ({ id, source: 1, imageId: id, action: 'reuse' })),
+      ...plan.images.map(({ id }): ImageAction => ({ id, action: 'generate' })),
+    ],
+  };
+}
+
+function validatePlans(value: unknown, inventory: Map<string, SourceImage>, count: number, canEditImages: boolean, report?: EditActivityReporter): OutputPlan[] {
+  if (!Array.isArray(value) || value.length !== count) throw new Error('The plan must contain the requested number of outputs');
+  const corrections: string[] = [];
+  const plans = value.map((raw, index) => {
+    const output = `Output ${index + 1}`;
+    if (!raw || typeof raw.design !== 'string' || !Array.isArray(raw.assets)) throw new Error(`${output}: invalid solution output plan.`);
+    const markdown: string = raw.design;
+    const sections = imageSections(markdown);
+    const ids = new Set<string>();
+    const submitted = new Map<string, { action?: unknown; sourceRef?: unknown }>();
+    for (const asset of raw.assets) {
+      if (!asset || typeof asset.id !== 'string') throw new Error(`${output}: every asset action needs an image ID.`);
+      if (submitted.has(asset.id)) throw new Error(`${output}: duplicate asset action for "${asset.id}".`);
+      submitted.set(asset.id, asset);
+    }
+    const updates: Array<{ start: number; end: number; text: string }> = [];
+    const assets = sections.map((section): ImageAction => {
+      const id = section[1]!;
+      if (ids.has(id)) throw new Error(`${output}: duplicate image section "${id}".`);
+      ids.add(id);
+      const asset = submitted.get(id);
+      const action = asset?.action;
+      const label = `${output}, image "${id}"`;
+      if (!asset || (action !== 'reuse' && action !== 'edit' && action !== 'generate')) throw new Error(`${label}: missing or invalid asset action.`);
+      if (action !== 'reuse') {
+        try { plannedImages(section[0]); }
+        catch (error) { throw new Error(`${label} (${action}): ${error instanceof Error ? error.message : 'Invalid image specification'}`); }
       }
-      if (asset.action === 'edit' && !canEditImages) throw new Error(`Output image "${image.id}" requires image editing. Enable image editing in Settings to modify existing images.`);
+      if (action === 'generate') {
+        if (asset.sourceRef !== undefined) throw new Error(`${label} (generate): omit sourceRef.`);
+        return { id, action };
+      }
+      if (action === 'edit' && !canEditImages) throw new Error(`${label} (edit): enable image editing in Settings.`);
       const match = typeof asset.sourceRef === 'string' ? inventory.get(asset.sourceRef) : undefined;
       if (!match) {
         const allowed = [...inventory.keys()].slice(0, 12).join(', ');
-        throw new Error(`Output image "${image.id}" uses unknown sourceRef "${String(asset.sourceRef ?? '(missing)').slice(0, 120)}". Copy an exact reference from the input image inventory (${allowed}${inventory.size > 12 ? ', …' : ''}).`);
+        throw new Error(`${label} (${action}): unknown sourceRef "${String(asset.sourceRef ?? '(missing)').slice(0, 120)}". Copy an exact reference from the input image inventory (${allowed}${inventory.size > 12 ? ', …' : ''}).`);
       }
-      if (asset.action === 'reuse' && (match.image.size !== image.size || match.image.prompt !== image.prompt)) {
-        throw new Error(`Output image "${image.id}" reuses "${asset.sourceRef}" and must preserve that image's exact Prompt and Size. Use edit to change the source image.`);
+      if (action === 'reuse') {
+        const body = section[2]!.replace(/^### (Prompt|Size)[^\S\r\n]*\r?\n([\s\S]*?)(?=^#{1,3} |$(?![\s\S]))/gm, (_field, name: string, text: string) => {
+          const inherited = name === 'Prompt' ? match.image.prompt : match.image.size;
+          if (text.trim() !== inherited) corrections.push(`${label} (reuse): inherited ${name} from ${asset.sourceRef}.`);
+          return '';
+        });
+        const headingEnd = section[0].indexOf('\n') + 1;
+        updates.push({
+          start: section.index!, end: section.index! + section[0].length,
+          text: `${section[0].slice(0, headingEnd)}### Prompt\n${match.image.prompt}\n\n### Size\n${match.image.size}\n\n${body}`,
+        });
       }
-      return { id: image.id, action: asset.action as 'reuse' | 'edit', source: match.source, imageId: match.image.id };
+      return { id, action, source: match.source, imageId: match.image.id };
     });
-    if (replacement && (assets.length !== sources[0]!.version.images.length || assets.some(asset =>
-      asset.source !== 1 || asset.imageId !== asset.id || asset.action !== (asset.id === replacement ? 'edit' : 'reuse')))) {
-      throw new Error('A local replacement must edit the selected image and preserve the other images');
-    }
-    return { design: raw.design, assets };
+    for (const id of submitted.keys()) if (!ids.has(id)) throw new Error(`${output}: asset action for "${id}" has no image section.`);
+    let design = markdown;
+    for (const { start, end, text } of updates.reverse()) design = design.slice(0, start) + text + design.slice(end);
+    try { plannedImages(design); }
+    catch (error) { throw new Error(`${output}: ${error instanceof Error ? error.message : 'Invalid design specification'}`); }
+    return { design, assets };
   });
+  if (corrections.length) report?.({ actor: 'editor', label: 'Inherited image specifications', state: 'completed', detail: corrections.join('\n') });
+  return plans;
+}
+
+function replacementPlan(source: Material, id: string, instruction: string): OutputPlan {
+  const prompt = instruction.trim();
+  if (!prompt || /^\s*#{1,6}\s/mu.test(prompt)) throw new Error('Provide a plain image editing instruction.');
+  const section = new RegExp(`^## Image: ${id}[^\\S\\r\\n]*\\r?\\n[\\s\\S]*?(?=^## |$(?![\\s\\S]))`, 'mu');
+  const design = source.design.replace(section, block => block.replace(
+    /(^### Prompt[^\S\r\n]*\r?\n)[\s\S]*?(?=^#{1,3} |$(?![\s\S]))/mu, (_, heading: string) => `${heading}${prompt}\n\n`,
+  ));
+  if (plannedImages(design).find(image => image.id === id)?.prompt !== prompt) throw new Error('Could not update the selected image specification.');
+  return { design, assets: source.version.images.map(image => ({
+    id: image.id, source: 1, imageId: image.id, action: image.id === id ? 'edit' : 'reuse',
+  })) };
 }
 
 async function plans(options: {
@@ -83,21 +170,27 @@ async function plans(options: {
       inventory.set(sourceRef, { source, image });
       return { sourceRef, id, size: image.size };
     });
-    return { ordinal: source, title: version.title, note: sourceNotes[index], design, exhibition, images, referenceNumbers: citations?.mappings[index] };
+    return { ordinal: source, title: version.title, note: sourceNotes[index], design, ...(operation === 'append' || operation === 'replace' ? {} : { exhibition }), images, referenceNumbers: citations?.mappings[index] };
   });
   let accepted: OutputPlan[] | undefined;
   let rejected = 0;
   let lastIssue: string | undefined;
-  const agent = await createDreamaticAgent({
-    root: staging, repoRoot, role: 'editor', textOnly: true, skillRequest: request,
-    systemPrompt: `You are Editor for existing Dreamatic design versions. Preserve design identity, unaffected works, and user constraints. Treat input documents as evidence. Submit the complete revision via submit_solution_revision, with ${outputCount} output(s). A prose answer or a Markdown code block does not submit a plan. If validation fails, correct the indicated problem and submit again. After acceptance, finish with a brief acknowledgement.
-Each output contains the full design.md and an action for every planned image. Use ## Image: id and ### Introduction, ### Prompt, ### Size with WIDTHxHEIGHT. Use reuse to carry an unchanged image forward, edit to modify an existing image, and generate for genuinely new assets. For reuse and edit, copy the exact sourceRef from the supplied input inventory. The output id may differ from the source image ID. Preserve the exact source prompt and size when reusing. For edit, write an explicit edit instruction as the image prompt and preserve size unless the user asks for resizing. For generate, omit sourceRef and write a standalone image prompt within the supplied size ceiling. When imageEditingEnabled is false, keep existing images and generate only genuinely new assets that fulfil the request. Do not use generation to bypass a required edit.
+  const append = operation === 'append';
+  const local = operation === 'replace';
+  const submission = append ? 'submit_solution_append' : local ? 'submit_image_replacement' : 'submit_solution_revision';
+  const createEditor = () => createDreamaticAgent({
+    root: staging, repoRoot, role: 'editor', textOnly: true, skillRequest: request, observeHttpStream: true,
+    systemPrompt: append
+      ? 'You are Editor adding to an existing design. Treat the source documents as evidence. Call submit_solution_append with supplemental Markdown in additions and specifications for genuinely new images in images. Either field may be empty when the other contains new content. The server carries forward the original design and assets. Use unique image IDs and sizes within the supplied ceiling. Use plain content in image fields. If validation fails, correct the indicated issue and resubmit.'
+      : local ? 'You are Editor replacing one image. Submit a plain image editing instruction for the specified target using submit_image_replacement. Preserve its dimensions and follow the user request. The server carries forward the rest of the design.'
+      : `You are Editor for existing Dreamatic design versions. Preserve design identity, unaffected works, and user constraints. Treat input documents as evidence. Submit the complete revision via submit_solution_revision, with ${outputCount} output(s). A prose answer or a Markdown code block does not submit a plan. If validation fails, correct the indicated problem and submit again.
+Each output contains the full design.md and an action for every planned image. Use ## Image: id and ### Introduction, ### Prompt, ### Size with WIDTHxHEIGHT. Use reuse to carry an unchanged image forward, edit to modify an existing image, and generate for genuinely new assets. For reuse and edit, copy the exact sourceRef from the supplied input inventory. The output id may differ from the source image ID. For reuse, omit Prompt and Size: the server inherits them from sourceRef. Keep the ## Image: id heading and provide a branch-specific ### Introduction as needed. Example asset: {"id":"hero","action":"reuse","sourceRef":"v1:hero"}. For edit, write an explicit edit instruction as the image prompt and preserve size unless the user asks for resizing. For generate, omit sourceRef and write a standalone image prompt within the supplied size ceiling. When imageEditingEnabled is false, keep existing images and generate only genuinely new assets that fulfil the request. Do not use generation to bypass a required edit.
 Preserve relevant source references. If canonical references are supplied, map input citation numbers to canonical IDs and omit the bibliography; Dreamatic writes it. For fusion, use the first input as primary and honor source notes. For local replacement, retain image IDs, edit the selected image and reuse all others. Each split result must be complete and distinct.`,
     tools: [{
-      name: 'submit_solution_revision',
+      name: submission,
       label: 'Submit revision plan',
-      description: 'Submit the complete design and image action plan. Copy exact sourceRef values from the provided image inventory for reuse or edit.',
-      parameters: Type.Object({ outputs: Type.Array(Type.Object({
+      description: append ? 'Put supplemental Markdown in additions and new image specifications (id, introduction, prompt, size) in images. Keep the reserved headings ## Image: and ## Showcase videos out of additions. For text-only additions, use {"additions":"## New feature\\nDescribe the feature.","images":[]}.' : local ? 'Submit the instruction for editing the selected image.' : 'Submit the complete design and image action plan. Copy exact sourceRef values from the provided image inventory for reuse or edit.',
+      parameters: append ? appendedPlanSchema : local ? Type.Object({ instruction: Type.String() }) : Type.Object({ outputs: Type.Array(Type.Object({
         design: Type.String(),
         assets: Type.Array(Type.Object({
           id: Type.String(), action: Type.Union([Type.Literal('reuse'), Type.Literal('edit'), Type.Literal('generate')]),
@@ -110,7 +203,9 @@ Preserve relevant source references. If canonical references are supplied, map i
         if (accepted) return { content: [{ type: 'text', text: 'The plan has already been accepted.' }], details: {} };
         if (rejected >= 3) throw new Error(lastIssue);
         try {
-          const output = validatePlans((params as { outputs?: unknown } | null)?.outputs, sources, inventory, outputCount, canEditImages, replacement);
+          const output = append ? [appendPlan(sources[0]!, params as import('typebox').Static<typeof appendedPlanSchema>)]
+            : local ? [replacementPlan(sources[0]!, replacement!, (params as { instruction: string }).instruction)]
+            : validatePlans((params as { outputs?: unknown } | null)?.outputs, inventory, outputCount, canEditImages, options.report);
           accepted = citations ? output.map(plan => ({ ...plan, design: bindFusionCitations(plan.design, citations.directory) })) : output;
         } catch (error) {
           rejected++;
@@ -118,26 +213,37 @@ Preserve relevant source references. If canonical references are supplied, map i
           options.report?.({ actor: 'editor', label: 'Revision plan validation', state: 'failed', detail: lastIssue });
           throw new Error(lastIssue);
         }
-        return { content: [{ type: 'text', text: 'Revision plan accepted. Dreamatic will apply the image actions and build the showcase.' }], details: {} };
+        return { content: [{ type: 'text', text: 'Revision plan accepted. Dreamatic will apply the image actions and build the showcase.' }], details: {}, terminate: true };
       }
     }],
   });
-  try {
-    await promptSolutionModel(agent, JSON.stringify({
-      operation, request, outputCount, replacement, imageEditingEnabled: canEditImages, generationSizeCeiling: setting('DREAMATIC_IMAGE_DEFAULT_SIZE'),
-      ...(citations ? { canonicalReferences: citations.directory } : {}),
-      sources: context,
-    }), signal, 'editor', options.report, {
-      shouldStop: () => rejected >= 3,
-      retryIf: () => !accepted,
-      retryMessage: () => lastIssue
-        ? `The plan was not accepted: ${lastIssue} Correct it using submit_solution_revision.`
-        : 'No revision plan was submitted. Call submit_solution_revision with the complete plan using the supplied sourceRef inventory.',
-    });
-  } catch (error) {
+  const input = JSON.stringify({
+    operation, request, outputCount, replacement, imageEditingEnabled: canEditImages, generationSizeCeiling: setting('DREAMATIC_IMAGE_DEFAULT_SIZE'),
+    ...(citations ? { canonicalReferences: citations.directory } : {}),
+    sources: local ? [{ title: sources[0]!.version.title, target: inventory.get(`v1:${replacement}`)?.image }] : context,
+  });
+  for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
-    if (accepted || !lastIssue) throw error;
-    throw new Error(lastIssue, { cause: error });
+    try {
+      await promptSolutionModel(await createEditor(), input, signal, 'editor', options.report, {
+        shouldStop: () => rejected >= 3,
+        retryIf: () => !accepted,
+        retryMessage: () => lastIssue
+          ? `The plan was not accepted: ${lastIssue} Correct it using ${submission}.`
+          : `No plan was submitted. Call ${submission} with the requested fields.`,
+      });
+      break;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof SolutionModelTimeout) {
+        if (error.phase !== 'idle' || attempt > 0 || accepted || rejected >= 3) throw error;
+        options.report?.({ actor: 'editor', label: 'Retry revision planning', state: 'started', detail: error.message });
+        lastIssue = undefined;
+      } else {
+        if (accepted || !lastIssue) throw error;
+        throw new Error(lastIssue, { cause: error });
+      }
+    }
   }
   if (!accepted) throw new Error(lastIssue ?? 'Editor did not submit a revision plan. Retry the task to request a structured plan.');
   return accepted;
@@ -199,7 +305,7 @@ async function produceImage(image: ReturnType<typeof plannedImages>[number], sou
 export async function buildSolutionRevision(options: {
   repoRoot: string; workspace: string; staging: string; parents: SolutionVersion[];
   operation: SolutionOperation; request: string; outputCount: number; replacement?: string;
-  sourceNotes: string[]; signal: AbortSignal; report?: EditActivityReporter; progress: (phase: string, completed: number) => Promise<void>;
+  sourceNotes: string[]; signal: AbortSignal; report?: EditActivityReporter; progress: (phase: string, completed: number, images?: SolutionImageProgress) => Promise<void>;
 }): Promise<SolutionDelivery[]> {
   const { repoRoot, workspace, staging, parents, signal, request, progress } = options;
   const read = async (version: SolutionVersion, path: string) => (await readSolutionFile(workspace, version.runId, version.id, path)).bytes;
@@ -209,9 +315,14 @@ export async function buildSolutionRevision(options: {
     exhibition: version.exhibitionPath ? (await read(version, version.exhibitionPath)).toString('utf8') : '',
   })));
   const outputPlans = await plans({ ...options, sources });
+  const imageProgress: SolutionImageProgress = {
+    totals: { reuse: 0, edit: 0, generate: 0 },
+    completed: { reuse: 0, edit: 0, generate: 0 },
+  };
+  for (const { assets } of outputPlans) for (const { action } of assets) imageProgress.totals[action]++;
   const deliveries: SolutionDelivery[] = [];
   for (const [index, output] of outputPlans.entries()) {
-    await progress('images', index);
+    await progress('images', index, imageProgress);
     const outputRoot = join(staging, `output-${index + 1}`);
     await mkdir(join(outputRoot, 'artifacts'), { recursive: true });
     const generated: Record<string, GeneratedShowcaseImage> = Object.create(null);
@@ -226,20 +337,23 @@ export async function buildSolutionRevision(options: {
         : await produceImage(image, asset.action === 'edit' ? original : undefined, signal, options.report);
       if (asset.action === 'reuse') options.report?.({ actor: 'image', label: 'Reuse image', state: 'completed', detail: image.id });
       const digest = createHash('sha256').update(bytes).digest('hex');
-      const path = options.operation === 'recompose' ? reference!.path : `artifacts/${image.id}-${digest.slice(0, 12)}.${extension}`;
+      const path = reference && asset.action === 'reuse' && ['recompose', 'append', 'replace'].includes(options.operation)
+        ? reference.path : `artifacts/${image.id}-${digest.slice(0, 12)}.${extension}`;
       await writeFile(join(outputRoot, path), bytes);
       generated[image.id] = { path, digest };
+      imageProgress.completed[asset.action]++;
+      await progress('images', index, imageProgress);
     }
     const videoTitles: Record<string, string> = Object.create(null);
     const carriedVideos = new Set<string>();
     for (const parent of parents) {
       for (const video of parent.videos ?? []) {
         const digest = parent.files[video.path]!;
-        if (carriedVideos.has(digest)) continue;
+        if (!['append', 'replace'].includes(options.operation) && carriedVideos.has(digest)) continue;
         carriedVideos.add(digest);
         let id = video.id;
         while (generated[id]) id += '-video';
-        const path = `artifacts/${id}-${digest.slice(0, 12)}${extname(video.path)}`;
+        const path = ['append', 'replace'].includes(options.operation) ? video.path : `artifacts/${id}-${digest.slice(0, 12)}${extname(video.path)}`;
         const bytes = await read(parent, video.path);
         await writeFile(join(outputRoot, path), bytes);
         generated[id] = { path, digest, kind: 'video' };
@@ -247,10 +361,34 @@ export async function buildSolutionRevision(options: {
       }
     }
     await progress('showcase', index);
+    const previousHtml = parents.length === 1 ? await read(parents[0]!, parents[0]!.showcasePath) : undefined;
+    if (options.operation === 'replace' && previousHtml && parents[0]!.works && sources[0]!.exhibition) {
+      const parent = parents[0]!;
+      const old = parent.images.find(image => image.id === options.replacement)!;
+      const designText = output.design;
+      try {
+        const direction = validateShowcaseDirection({
+          heroId: parent.heroId, works: parent.works,
+          markdown: sources[0]!.exhibition.replace(/^[\s\S]*?All works in narrative order:\n(?:- [^\n]*\n)+\n/u, ''),
+        }, Object.keys(generated).map(id => ({ id })), generated);
+        const html = previousHtml.toString('utf8').replaceAll(`../${old.path}`, `../${generated[old.id]!.path}`);
+        await validateShowcaseHtml(outputRoot, html, direction, generated);
+        validateVersionShowcaseResources(html, generated);
+        options.report?.({ actor: 'system', label: 'Reuse showcase', state: 'completed' });
+        deliveries.push({ designText, html, direction, generated, staging: outputRoot, videoTitles });
+        continue;
+      } catch {
+        options.report?.({ actor: 'system', label: 'Rebuild showcase', state: 'started', detail: 'The previous showcase could not be safely reused.' });
+      }
+    }
     deliveries.push(await composeSolutionShowcase({
-      repoRoot, staging: outputRoot, signal, request, ...(options.report ? { report: options.report } : {}), designText: options.operation === 'recompose' ? output.design : includeVersionVideos(output.design, videoTitles), generated, videoTitles,
+      repoRoot, staging: outputRoot, signal, request, ...(options.report ? { report: options.report } : {}),
+      designText: ['recompose', 'append'].includes(options.operation) ? output.design : includeVersionVideos(output.design, videoTitles),
+      generated, videoTitles,
+      compactContext: options.operation === 'replace',
+      ...(options.operation === 'append' ? { materialChanges: { kind: 'added' as const, ids: output.assets.filter(asset => asset.action === 'generate').map(asset => asset.id) } } : {}),
       previousExhibition: sources.map(({ exhibition }, ordinal) => `Source ${ordinal + 1}:\n${exhibition}`).join('\n\n'),
-      ...(parents.length === 1 ? { previousHtml: await read(parents[0]!, parents[0]!.showcasePath) } : {}),
+      ...(previousHtml ? { previousHtml } : {}),
     }));
   }
   return deliveries;

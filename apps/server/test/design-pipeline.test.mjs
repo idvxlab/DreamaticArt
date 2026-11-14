@@ -37,6 +37,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  const { readFile } = await import('node:fs/promises');
  const root = await mkdtemp(join(tmpdir(),'dreamatic-pipeline-')); const old = {...process.env};
  const calls = [];
+ let stalledPlanningCalls = 0, persistentStalls = 0;
  let shouldClarify = true;
  let skipPlan = false, failSolutionOutput = false, imageEdits = 0, imageRequests = 0, brokenReferences = false, failHero = false, heroFailureRequests = 0, onlyMissingOnResume = false;
  const server = createServer(async (req,res) => {
@@ -52,39 +53,80 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
   if (req.method === 'GET') { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({id:'fixture',object:'model'})); return; }
   if(req.url.endsWith('/images/generations')) { imageRequests++; if(failHero && data.prompt.includes('portrait')) {heroFailureRequests++;res.writeHead(502,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'upstream unavailable'}));return;} await new Promise(resolve=>setTimeout(resolve,1000)); res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({data:[{b64_json:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='}]})); return; }
   const system = data.messages.find(m=>m.role==='system')?.content || '';
-  if (system.includes('You are Editor for existing Dreamatic design versions')) {
+  if (system.includes('You are Editor adding to an existing design')) {
+   assert.ok(data.tools.some(tool => tool.function.name === 'submit_solution_append'));
+   assert.ok(!data.tools.some(tool => tool.function.name === 'submit_solution_revision'));
+   const submitted = data.messages.filter(message => message.role === 'tool');
+   const last = submitted.at(-1);
+   const accepted = JSON.stringify(last?.content ?? '').includes('Revision plan accepted');
+   if (last?.tool_call_id === 'append-image-heading') assert.match(JSON.stringify(last.content), /additions line 2.*## Image:.*Move the new image specification to images/);
+   if (last?.tool_call_id === 'append-video-heading') assert.match(JSON.stringify(last.content), /additions line 1.*## Showcase videos.*Remove that heading/);
+   const [id, additions] = !last ? ['append-image-heading', 'Supplement\n## Image: lantern']
+    : last.tool_call_id === 'append-image-heading' ? ['append-video-heading', '# Showcase videos']
+    : ['append-valid', '# Supplemental concept\nA new lantern installation.'];
+   const args = { additions, images: [{ id: 'lantern', introduction: 'Lantern installation', prompt: 'A lantern installation', size: '1024x1024' }] };
+   const delta = accepted ? {content:'Additions submitted.'} : {tool_calls:[{index:0,id,type:'function',function:{name:'submit_solution_append',arguments:JSON.stringify(args)}}]};
+   res.writeHead(200, {'Content-Type':'text/event-stream'});
+   for (const choice of [{delta:{role:'assistant',...delta},finish_reason:null},{delta:{},finish_reason:accepted?'stop':'tool_calls'}]) {
+    res.write(`data: ${JSON.stringify({id:'append',object:'chat.completion.chunk',created:1,model:'fixture-editor',choices:[{index:0,...choice}]})}\n\n`);
+   }
+   res.end('data: [DONE]\n\n');
+   return;
+  }
+  if (system.includes('You are Editor for existing Dreamatic design versions') || system.includes('You are Editor replacing one image')) {
    assert.equal(data.model, 'fixture-editor');
    const content = data.messages.find(message => message.role === 'user').content;
    const input = JSON.parse(typeof content === 'string' ? content : content.find(block => block.type === 'text').text);
-   assert.ok(data.tools.some(tool => tool.function.name === 'submit_solution_revision'));
+   const stall = input.request === 'Fixture: stalled revision stream' && ++stalledPlanningCalls === 1;
+   const persistentStall = input.request === 'Fixture: persistently stalled revision stream';
+   if (persistentStall) persistentStalls++;
+   if (stall || persistentStall) {
+    res.writeHead(200, {'Content-Type': 'text/event-stream', 'X-Request-Id': 'fixture-stalled-editor'});
+    res.write(`data: ${JSON.stringify({id:'stalled',object:'chat.completion.chunk',created:1,model:'fixture-editor',choices:[{index:0,delta:{role:'assistant',content:'Partial response'},finish_reason:null}]})}\n\n`);
+    return;
+   }
+   const localReplacement = input.operation === 'replace';
+   if (localReplacement) {
+    assert.equal(input.sources[0].target.id, 'hero');
+    assert.equal(input.sources[0].design, undefined);
+   }
+   const submission = localReplacement ? 'submit_image_replacement' : 'submit_solution_revision';
+   assert.ok(data.tools.some(tool => tool.function.name === submission));
    const results = data.messages.filter(message => message.role === 'tool');
+   const invalidSchema = input.request === 'Fixture: malformed revision arguments';
    const permanentlyInvalid = input.request === 'Fixture: invalid references on every submission';
-   const firstProse = !permanentlyInvalid && input.operation === 'revise' && data.messages.filter(message => message.role === 'user').length === 1 && !results.length;
+   const firstProse = !permanentlyInvalid && !invalidSchema && input.operation === 'revise' && data.messages.filter(message => message.role === 'user').length === 1 && !results.length;
    const rejected = permanentlyInvalid || (input.operation === 'revise' && !results.length && !firstProse);
    const accepted = results.some(message => JSON.stringify(message.content).includes('Revision plan accepted'));
-   if (input.operation === 'revise' && results.length && !accepted) {
+   if (input.operation === 'revise' && results.length && !accepted && !invalidSchema) {
     assert.match(JSON.stringify(results[0].content), /unknown sourceRef/);
     assert.match(JSON.stringify(results[0].content), /v1:detail/);
    }
    const outputs = Array.from({ length: input.outputCount }, (_, index) => ({
-    design: input.sources[0].design.replace(/^# .+$/m, `# ${input.operation} version ${index + 1}`),
+    design: localReplacement ? '' : input.sources[0].design.replace(/^# .+$/m, `# ${input.operation} version ${index + 1}`),
     assets: ['hero', 'detail'].map(id => {
      const action = input.replacement === id ? 'edit' : input.operation === 'revise' && id === 'hero' ? 'generate' : 'reuse';
      if (action === 'generate') return { id, action };
      const source = input.sources[input.operation === 'fuse' && id === 'detail' ? 1 : 0];
-     const sourceRef = rejected ? 'v1:nonexistent' : source.images.find(image => image.id === id).sourceRef;
+     const sourceRef = rejected ? 'v1:nonexistent' : source.images?.find(image => image.id === id).sourceRef;
      return { id, action, sourceRef };
     }),
    }));
+   if (input.operation === 'split') {
+    for (const [index, output] of outputs.entries()) {
+     output.design = output.design.replace(/^## Image: detail\n[\s\S]*?(?=^## |$(?![\s\S]))/m,
+      `## Image: detail\n### Introduction\nMaterial study for branch ${index + 1}\n\n${index ? '### Size\n1x1\n### Prompt\nMisquoted prompt\n\n' : ''}`);
+    }
+   }
    if (input.replacement) {
     const sourcePrompt = /(^## Image: hero[\s\S]*?^### Prompt\s*\n)([\s\S]*?)(?=^#{1,3} |$(?![\s\S]))/m;
     outputs[0].design = outputs[0].design.replace(sourcePrompt, '$1Change the lamp finish\n');
    }
-   const delta = firstProse ? { content: 'Now I have a revision plan.' }
+   const delta = firstProse || (invalidSchema && results.length) ? { content: 'Now I have a revision plan.' }
     : accepted ? { content: 'Revision plan submitted.' }
-    : { tool_calls: [{ index: 0, id: rejected ? `invalid-plan-${results.length}` : 'plan', type: 'function', function: { name: 'submit_solution_revision', arguments: JSON.stringify({ outputs }) } }] };
+    : { tool_calls: [{ index: 0, id: rejected ? `invalid-plan-${results.length}` : 'plan', type: 'function', function: { name: submission, arguments: JSON.stringify(invalidSchema ? { outputs: 'PRIVATE_FIXTURE_PAYLOAD' } : localReplacement ? { instruction: 'Change the lamp finish' } : { outputs }) } }] };
    res.writeHead(200, {'Content-Type': 'text/event-stream'});
-   for (const choice of [{delta:{role:'assistant',...delta},finish_reason:null},{delta:{},finish_reason:firstProse || accepted ? 'stop' : 'tool_calls'}]) {
+   for (const choice of [{delta:{role:'assistant',...delta},finish_reason:null},{delta:{},finish_reason:'content' in delta ? 'stop' : 'tool_calls'}]) {
     res.write(`data: ${JSON.stringify({id:'revision-plan',object:'chat.completion.chunk',created:1,model:'fixture-editor',choices:[{index:0,...choice}]})}\n\n`);
    }
    res.end('data: [DONE]\n\n');
@@ -107,14 +149,19 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
   calls.push(stage);
   if (stage==='orchestrator' && shouldClarify) {
    shouldClarify=false;
-   const args={title:'Choose the intended setting',context:'This changes the design direction.',questions:[{id:'audience',header:'Audience',question:'Who is this for?',options:[{label:'Home',description:'Domestic use'},{label:'Office',description:'Workplace use'}],multiple:false,custom:true,required:true}]};
+   assert.match(system, /would significantly change the design or deliverables/);
+   const askUser = data.tools.find(tool => tool.function.name === 'ask_user');
+   assert.equal(askUser.function.parameters.properties.questions.maxItems, 10);
+   const args={title:'Choose the intended setting',context:'This changes the design direction.',questions:[{id:'audience',header:'Audience',question:'Who is this for?',options:[{label:'Home',description:'Domestic use'},{label:'Office',description:'Workplace use'}],multiple:false,custom:true,required:true},
+    ...Array.from({length:9}, (_, index) => ({header:`Detail ${index + 1}`,question:`What is your preference for detail ${index + 1}?`,required:false}))]};
    res.writeHead(200,{'Content-Type':'text/event-stream'});
    for(const choice of [{delta:{role:'assistant',tool_calls:[{index:0,id:'clarify',type:'function',function:{name:'ask_user',arguments:JSON.stringify(args)}}]},finish_reason:null},{delta:{},finish_reason:'tool_calls'}]) res.write(`data: ${JSON.stringify({id:'clarification',object:'chat.completion.chunk',created:1,model:'fixture',choices:[{index:0,...choice}]})}\n\n`);
    res.end('data: [DONE]\n\n');return;
   }
 
   const generationText=data.messages.find(m=>m.role==='tool' && m.tool_call_id==='generate')?.content || '';
-  const imageTags=['hero','detail'].map(id=>`<img src="${generationText.match(new RegExp(id+': (dreamatic-image:[^\\s]+)'))?.[1] || 'dreamatic-image:'+id}">`).join('');
+  const appended = recompose && data.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('## Image: lantern'));
+  const imageTags=['hero','detail',...(appended ? ['lantern'] : [])].map(id=>`<img src="${generationText.match(new RegExp(id+': (dreamatic-image:[^\\s]+)'))?.[1] || 'dreamatic-image:'+id}">`).join('');
   const result = stage==='orchestrator' ? '# Aurora\nA sustainable lamp.' : stage==='researcher' ? (brokenReferences ? '# Research\nUncertain evidence [8].\n## References\n[1] Known source. https://example.org/background\n[1] Different source with the same id. URL unavailable\n' : '# Research\nBackground source: https://example.org/background\n\n## References\n[1] Supporting evidence. https://example.org/support\n[2] Background reading. https://example.org/background\n') : stage==='designer' ? (brokenReferences ? '# Concept\nUnresolved evidence [77].\n' : '')+design.replace('768x1024','1024x1024')+'\n## References\n[2] Rewritten bibliography. https://wrong.example/source\n' : recompose ? `<!doctype html><html><body><h1>Revised exhibition</h1>${imageTags}</body></html>` : "Now I will compose the complete exhibition HTML.\n\n```html\n"+`<!doctype html><html><body>${imageTags}</body></html>`+"\n```\nThe exhibition is ready.";
   const needsRead = !recompose && !data.messages.some(m=>m.role==='tool' && m.tool_call_id===`read-${stage}`);
   const classify = ['orchestrator','designer'].includes(stage) && !data.messages.some(m=>m.role==='tool' && m.tool_call_id==='classification');
@@ -125,7 +172,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
   const delta = needsRead ? toolCall(`read-${stage}`,'read',{path:join(process.cwd(),'apps/server/prompts',`${stage}.md`)})
     : classify ? toolCall('classification','set_project_classification',{primary:stage==='designer'?'product':'visual',secondary:[]})
     : tool ? toolCall('generate','image_generate',{ids:onlyMissingOnResume?['hero']:['hero','detail']})
-    : plan ? toolCall('plan','plan_showcase',{heroId:'hero',works:[{id:'hero',role:'hero',section:'Everyday light',purpose:'Introduce the concept'},{id:'detail',role:'detail',section:'Material logic',purpose:'Explain construction'}],direction:recompose ? '## Art direction\nA revised exhibition.' : '## Thesis\nA sustainable lamp in everyday use.\n## Art direction\nA warm light field, quiet typography and a dominant full-view hero.\n## Sequence\nHero followed by the complete detail study and concise material rationale.'})
+    : plan ? toolCall('plan','plan_showcase',{heroId:'hero',works:[{id:'hero',role:'hero',section:'Everyday light',purpose:'Introduce the concept'},{id:'detail',role:'detail',section:'Material logic',purpose:'Explain construction'},...(appended ? [{id:'lantern',role:'detail',section:'Supplement',purpose:'Show the new installation'}] : [])],direction:recompose ? '## Art direction\nA revised exhibition.' : '## Thesis\nA sustainable lamp in everyday use.\n## Art direction\nA warm light field, quiet typography and a dominant full-view hero.\n## Sequence\nHero followed by the complete detail study and concise material rationale.'})
     : {content:result};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   const chunk = {id:'test',object:'chat.completion.chunk',created:1,model:'fixture',choices:[{index:0,delta:{role:'assistant',...delta},finish_reason:null}]};
@@ -151,6 +198,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  let pending;
  await runDesign({...options,onQuestion:request=>{pending=request;}});
  assert.equal(pending.title,'Choose the intended setting');
+ assert.equal(pending.questions.length,10);
  assert.equal(pending.questions[0].options.length,2);
  assert.equal(pending.id,'clarify');
  assert.equal(JSON.parse(await readFile(join(root,'runs/project/run-state.json'),'utf8')).status,'waiting_for_user');
@@ -253,12 +301,19 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  const split = await waitForSolution(splitInput.id);
  assert.equal(split.status, 'succeeded', split.error);
  assert.equal(split.outputIds.length, 2);
+ assert.deepEqual(split.imageProgress, { totals: { reuse: 4, edit: 0, generate: 0 }, completed: { reuse: 4, edit: 0, generate: 0 } });
  currentVersions = await listSolutionVersions(root, 'project');
- for (const id of split.outputIds) {
+ const fusedVersion = currentVersions.find(version => version.id === fused.outputId);
+ const sourceDetail = plannedImages((await readSolutionFile(root, 'project', fusedVersion.id, fusedVersion.designPath)).bytes.toString()).find(image => image.id === 'detail');
+ for (const [index, id] of split.outputIds.entries()) {
   const child = currentVersions.find(version => version.id === id);
   assert.deepEqual(child.parentIds, [fused.outputId]);
   assert.equal(child.exhibitionPath, 'showcase.md');
+  const detail = plannedImages((await readSolutionFile(root, 'project', child.id, child.designPath)).bytes.toString()).find(image => image.id === 'detail');
+  assert.deepEqual(detail, { ...sourceDetail, introduction: `Material study for branch ${index + 1}` });
+  assert.equal(child.files[child.images.find(image => image.id === 'detail').path], fusedVersion.files[fusedVersion.images.find(image => image.id === 'detail').path]);
  }
+ assert.ok(split.activity[0].events.some(event => event.label === 'Inherited image specifications' && event.detail.includes('Output 2, image "detail"')));
  assert.equal(currentVersions.length, 6);
  process.env.DREAMATIC_IMAGE_EDIT_ENABLED = 'false';
  const disabledInput = { ...taskInput, id: 'replace-disabled', operation: 'replace', replacement: 'hero' };
@@ -269,7 +324,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  assert.equal(imageEdits, 0);
  process.env.DREAMATIC_IMAGE_EDIT_ENABLED = 'true';
  process.env.DREAMATIC_IMAGE_EDIT_SIZE = '1024x1024';
- const replaceInput = { ...taskInput, id: 'replace-lamp', operation: 'replace', replacement: 'hero' };
+ const replaceInput = { ...taskInput, id: 'replace-lamp', parentId: revision.id, operation: 'replace', replacement: 'hero' };
  await submitSolutionTask(root, root, 'project', replaceInput);
  const replaced = await waitForSolution(replaceInput.id);
  assert.equal(replaced.status, 'succeeded', replaced.error);
@@ -278,6 +333,8 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  assert.notEqual(digestFor(child, 'hero'), digestFor(parent, 'hero'));
  assert.equal(digestFor(child, 'detail'), digestFor(parent, 'detail'));
  assert.equal(imageEdits, 1);
+ assert.equal(replaced.activity[0].events.filter(event => event.actor === 'editor' && event.label === 'Model response').length, 1);
+ assert.ok(!replaced.activity[0].events.some(event => event.actor === 'builder'));
  assert.equal(imageRequests, oldImageRequests);
  const reviseInput = { ...taskInput, id: 'revise-lamp', operation: 'revise', parentIds: [split.outputIds[0]] };
  await submitSolutionTask(root, root, 'project', reviseInput);
@@ -297,6 +354,49 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  assert.match(invalid.error, /"detail".*unknown sourceRef.*v1:detail/);
  assert.equal(invalid.activity[0].events.filter(event => event.label === 'Revision plan validation').length, 3);
  assert.ok(!(await listSolutionVersions(root, 'project')).some(version => version.id === invalidSubmission.outputId));
+ const malformedInput = { ...invalidInput, id: 'malformed-plan', prompt: 'Fixture: malformed revision arguments' };
+ await submitSolutionTask(root, root, 'project', malformedInput);
+ const malformed = await waitForSolution(malformedInput.id);
+ assert.equal(malformed.status, 'failed');
+ const malformedEvents = malformed.activity[0].events;
+ assert.ok(!malformedEvents.some(event => event.label === 'Revision plan validation'));
+ const diagnostic = malformedEvents.find(event => event.label === 'submit_solution_revision' && event.state === 'failed');
+ assert.match(diagnostic.detail, /Validation failed.*\n[\s\S]*outputs/i);
+ assert.doesNotMatch(diagnostic.detail, /Received arguments|PRIVATE_FIXTURE_PAYLOAD/);
+ const stalledInput = { ...replaceInput, id: 'stalled-editor', parentId: parent.id, prompt: 'Fixture: stalled revision stream' };
+ process.env.DREAMATIC_MODEL_IDLE_TIMEOUT_MS = '150';
+ await submitSolutionTask(root, root, 'project', stalledInput);
+ const recovered = await waitForSolution(stalledInput.id);
+ assert.equal(recovered.status, 'succeeded', recovered.error);
+ assert.ok(recovered.activity[0].events.some(event => event.actor === 'builder'), 'legacy showcase falls back to Builder');
+ assert.equal(stalledPlanningCalls, 2, 'stalled call, then fresh plan');
+ const events = recovered.activity[0].events;
+ const failure = events.find(event => event.label === 'Model response' && event.state === 'failed');
+ assert.match(failure.detail, /Timeout phase: idle.*Provider request ID: fixture-stalled-editor.*Last HTTP stream chunk: \d{4}-/);
+ assert.equal(events.filter(event => event.label === 'Retry revision planning').length, 1);
+ assert.equal(imageEdits, 2, 'only the successful planning attempt applies the image edit');
+ const persistentInput = { ...stalledInput, id: 'persistent-stall', prompt: 'Fixture: persistently stalled revision stream' };
+ await submitSolutionTask(root, root, 'project', persistentInput);
+ const persistentFailure = await waitForSolution(persistentInput.id);
+ delete process.env.DREAMATIC_MODEL_IDLE_TIMEOUT_MS;
+ assert.equal(persistentFailure.status, 'failed');
+ assert.equal(persistentFailure.error, 'Model response timeout (idle)');
+ assert.equal(persistentStalls, 2);
+ assert.equal(imageEdits, 2, 'failed planning never applies an image edit');
+ const appendInput = { ...taskInput, id: 'append-lantern', operation: 'append', prompt: 'Add a lantern installation' };
+ const beforeAppend = imageRequests;
+ await submitSolutionTask(root, root, 'project', appendInput);
+ const appendedSolution = await waitForSolution(appendInput.id);
+ assert.equal(appendedSolution.status, 'succeeded', appendedSolution.error);
+ assert.equal(imageRequests, beforeAppend + 1);
+ assert.equal(imageEdits, 2);
+ const appendedVersion = (await listSolutionVersions(root, 'project')).find(version => version.id === appendedSolution.outputId);
+ const originalMarkdown = (await readSolutionFile(root, 'project', parent.id, parent.designPath)).bytes;
+ const appendedMarkdown = (await readSolutionFile(root, 'project', appendedVersion.id, appendedVersion.designPath)).bytes;
+ assert.deepEqual(appendedMarkdown.subarray(0, originalMarkdown.length), originalMarkdown);
+ assert.match(appendedMarkdown.subarray(originalMarkdown.length).toString(), /^## Supplemental concept$/m);
+ assert.match(appendedMarkdown.toString(), /## Image: lantern/);
+ for (const image of parent.images) assert.equal(appendedVersion.files[image.path], parent.files[image.path]);
  const cancelInput = { ...taskInput, id: 'cancel-revision', operation: 'revise' };
  const cancellable = await submitSolutionTask(root, root, 'project', cancelInput);
  await solutionTaskAction(root, root, 'project', cancelInput.id, 'cancel');

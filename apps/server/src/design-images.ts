@@ -4,8 +4,11 @@ export function dimensions(size: string): [number, number] {
   return [Number(match[1]), Number(match[2])];
 }
 export interface PlannedImage { id: string; introduction: string; size: string; prompt: string }
+export function imageSections(markdown: string) {
+  return [...markdown.matchAll(/^## Image: ([a-zA-Z0-9_-]+)[^\S\r\n]*\r?\n([\s\S]*?)(?=^## |$(?![\s\S]))/gm)];
+}
 export function plannedImages(markdown: string): PlannedImage[] {
-  const images = [...markdown.matchAll(/^## Image: ([a-zA-Z0-9_-]+)\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/gm)].map(m => {
+  const images = imageSections(markdown).map(m => {
     const field = (name: string) => new RegExp(`^### ${name}\\s*\\n([\\s\\S]*?)(?=^#{1,3} |$(?![\\s\\S]))`, 'm').exec(m[2]!)?.[1]?.trim() || '';
     const size = field('Size'); dimensions(size);
     const prompt = field('Prompt'); if (!prompt) throw new Error(`Missing prompt: ${m[1]}`);

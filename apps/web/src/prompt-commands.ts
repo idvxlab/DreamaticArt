@@ -1,12 +1,19 @@
 import type { SolutionTaskInput } from './api';
 
-const commands = {
+export const commands = {
+  append: 'append', '追加': 'append',
   recompose: 'recompose', '重排': 'recompose',
   fuse: 'fuse', '融合': 'fuse',
   split: 'split', '拆分': 'split',
   replace: 'replace', '替换': 'replace',
   edit: 'edit', '修改': 'edit',
 } as const;
+
+export function operationCommand(operation: SolutionTaskInput['operation'], chinese = false) {
+  if (operation === 'revise') return chinese ? '/修改' : '/edit';
+  const labels = { append: '追加', recompose: '重排', fuse: '融合', split: '拆分', replace: '替换' };
+  return `/${chinese ? labels[operation] : operation}`;
+}
 
 export function promptCommand(text: string): {
   prompt: string; operation?: SolutionTaskInput['operation']; count?: number; error?: string; solutionOnly?: boolean;
@@ -23,6 +30,7 @@ export function promptCommand(text: string): {
     return { operation, solutionOnly: true, ...(count ? { count: Number(count[1]) } : {}),
       prompt: (count ? body.slice(count[0].length).trim() : body) || 'Split the connected solution into distinct, complete directions.' };
   }
+  if (operation === 'append') return { prompt: body, operation, solutionOnly: true };
   const defaults = { fuse: 'Combine the connected solutions into one cohesive design.', recompose: 'Recompose the showcase while preserving the design and all images.' };
   return { operation, solutionOnly: true, prompt: body || (operation === 'replace' ? '' : defaults[operation]) };
 }

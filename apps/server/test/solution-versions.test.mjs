@@ -1,3 +1,4 @@
+import { projectFileContent, projectMediaCatalog } from '../dist/project-files.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
@@ -51,6 +52,10 @@ test('completed deliveries import once and remain readable after the source chan
   assert.equal(version.exhibitionStatus, 'original');
   await save('showcase.md', 'A later draft');
   await save('artifacts/lamp.png', 'new image');
+  const mediaId = `version:${version.id}:artifacts/lamp.png`;
+  assert.ok((await projectMediaCatalog(workspace, 'lamp', [mediaId])).some(file => file.id === mediaId));
+  assert.equal((await projectFileContent(workspace, 'lamp', mediaId)).data.toString(), 'image');
+  await assert.rejects(projectFileContent(workspace, 'lamp', `version:${version.id}:design.md`), /Version media not found/);
   const read = path => readSolutionFile(workspace, 'lamp', version.id, path);
   assert.equal((await read('showcase.md')).bytes.toString(), markdown);
   assert.equal((await read('artifacts/lamp.png')).bytes.toString(), 'image');
@@ -260,6 +265,13 @@ test('solution HTTP tasks survive restart and publish integrated or replaced mat
   assert.ok(plans[1].detail.includes(newPhoto.id));
   assert.equal(new Set(plans.map(event => event.callId)).size, 3);
   assert.deepEqual(Buffer.from(await (await materialFile(newPhoto.path)).arrayBuffer()), photo);
+  const { snapshotMaterials } = await import('../dist/solution-materials.js');
+  const versionMaterial = `version:${withMaterials.id}:${newPhoto.path}`;
+  const snapshot = await snapshotMaterials(workspace, parent, root, {
+    mode: 'integrate', fileIds: [versionMaterial],
+  }, new AbortController().signal);
+  const { readFile } = await import('node:fs/promises');
+  assert.deepEqual(await readFile(join(root, snapshot.directory, snapshot.files[0].filename)), photo);
   assert.match(await (await materialFile(withMaterials.designPath)).text(), /## Showcase videos/);
   const clip = withMaterials.videos[0];
   const clipUrl = origin + `/versions/${withMaterials.id}/files/${clip.path}`;

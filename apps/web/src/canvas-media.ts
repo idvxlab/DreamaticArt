@@ -2,7 +2,7 @@ import { PROMPT_MIN_SIZE } from '@dreamatic/project-data/canvas-graph';
 import type { CanvasElementState, ProjectFile } from './types';
 export const CANVAS_MEDIA_MIME = 'application/x-dreamatic-project-media';
 export function mediaKind(file: ProjectFile): 'image' | 'video' | undefined {
-  if (file.url || (!file.path && !/^attachment:\d+$/u.test(file.id))) return;
+  if ((file.url && !file.versionId) || (!file.path && !/^attachment:\d+$/u.test(file.id))) return;
   const kind = file.kind.toLowerCase();
   if (/^(png|jpe?g|webp|gif|svg)$/u.test(kind)) return 'image';
   if (/^(mp4|webm|mov)$/u.test(kind)) return 'video';

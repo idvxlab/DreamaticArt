@@ -365,8 +365,9 @@ export async function runDesign(options: PipelineOptions) {
         }
       });
       let question: DesignClarificationRequest | undefined;
+      const maxClarificationQuestions = 10;
       if (stage === 'orchestrator') tools.push({
-        name: 'ask_user', label: 'Clarify direction', description: 'Present structured questions using Dreamatic’s existing clarification card. Ask only essential questions, then stop and wait.',
+        name: 'ask_user', label: 'Clarify direction', description: `Ask about missing information that would significantly change the design or deliverables. Group only the questions needed into one card, up to ${maxClarificationQuestions}, then stop and wait.`,
         parameters: Type.Object({
           title: Type.String(), context: Type.Optional(Type.String()),
           questions: Type.Array(Type.Object({
@@ -374,13 +375,14 @@ export async function runDesign(options: PipelineOptions) {
             options: Type.Optional(Type.Array(Type.Object({ label: Type.String(), description: Type.String() }), { minItems: 2, maxItems: 4 })),
             multiple: Type.Optional(Type.Boolean()), custom: Type.Optional(Type.Boolean()),
             required: Type.Optional(Type.Boolean()), placeholder: Type.Optional(Type.String())
-          }), { minItems: 1 })
+          }), { minItems: 1, maxItems: maxClarificationQuestions })
         }),
         async execute(toolCallId, params) {
           if (question) return { content: [{ type: 'text', text: JSON.stringify({ status: 'waiting_for_user', ...question }) }], details: {} };
           const result = { content: [{ type: 'text' as const, text: JSON.stringify({ ...(params as Record<string, unknown>), status: 'waiting_for_user' }) }], details: {} };
           const request = clarificationFromToolResult(result, toolCallId);
           if (!request) throw new Error('Invalid clarification questions');
+          if (request.questions.length > maxClarificationQuestions) throw new Error(`Ask at most ${maxClarificationQuestions} questions. Prioritize the decisions with the greatest impact.`);
           question = request;
           options.onQuestion?.(request);
           // Store pending questions before a transport interruption can lose them.

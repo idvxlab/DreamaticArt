@@ -1,18 +1,27 @@
 import { ArrowUp } from 'lucide-react';
-import { promptCommand } from '../prompt-commands';
+import { operationCommand, promptCommand } from '../prompt-commands';
 import type { SolutionTaskInput, SolutionVersion } from '../api';
 import { useI18n } from '../i18n';
 import type { CanvasElementState } from '../types';
 
 const operations = [
   ['revise', 'Revise solution'],
+  ['append', 'Append to solution'],
   ['recompose', 'Recompose showcase'],
   ['replace', 'Replace image'],
   ['fuse', 'Fuse solutions'],
   ['split', 'Split solution'],
 ] as const;
 
-export function solutionPromptOptions(item: CanvasElementState, sources: SolutionVersion[]) {
+export function solutionOperationLabel(operation: SolutionTaskInput['operation']) {
+  return operations.find(([value]) => value === operation)?.[1] ?? 'Prompt';
+}
+
+export function solutionSourceRole(count: number, index: number) {
+  return count === 1 ? 'Based on' : index === 0 ? 'Primary solution' : 'Reference solution';
+}
+
+export function solutionPromptOptions(item: CanvasElementState, sources: SolutionVersion[], inferredOperation?: SolutionTaskInput['operation']) {
   const command = promptCommand(item.text ?? '');
   const text = command.prompt;
   const split = /\b(?:split|divide|separate)\b|拆分|拆成|分成|拆为|拆出/iu.test(text);
@@ -26,47 +35,62 @@ export function solutionPromptOptions(item: CanvasElementState, sources: Solutio
   const words = new Set(text.toLowerCase().split(/[^a-z0-9_-]+/));
   const candidates = sources[0]?.images.filter(image => words.has(image.id.toLowerCase())) ?? [];
   const replaceImage = replace && (candidates.length > 0 || /\b(?:image|picture|photo|illustration)\b|图|照片/iu.test(text));
-  const wantsSplit = split || (sources.length === 1 && raw !== undefined && outputCount > 1);
-  const inferred = wantsSplit ? 'split'
-    : sources.length > 1 || fuse ? 'fuse'
-    : recompose ? 'recompose'
-    : replaceImage ? 'replace' : 'revise';
-  const operation = command.operation ?? item.operation ?? inferred;
-  const replacement = item.replacement || (candidates.length === 1 ? candidates[0]?.id : sources[0]?.images.length === 1 ? sources[0].images[0]?.id : undefined);
-  const canRun = (operation === 'fuse' ? sources.length >= 2 && sources.length <= 8 : sources.length === 1) &&
+  const append = /只追加|仅追加|追加|(?:保留|不修改|不改).{0,24}(?:新增|增加|添加|补充|加入)|(?:新增|添加|补充|增加).{0,20}(?:新图|图片|设计图)|\bappend\b|\badd\b.{0,30}\bnew (?:images?|sections?)\b/iu.test(text);
+  const revise = /修改|改成|调整|改善|优化|重做|\b(?:revise|edit|improve|change)\b/iu.test(text) && !append && !recompose && !replaceImage;
+  const matching = [split || (raw !== undefined && outputCount > 1) ? 'split' : undefined,
+    fuse ? 'fuse' : undefined, recompose ? 'recompose' : undefined, replaceImage ? 'replace' : undefined,
+    append ? 'append' : undefined, revise ? 'revise' : undefined].filter((value): value is SolutionTaskInput['operation'] => Boolean(value));
+  const eligible = operations.map(([value]) => value).filter(value => sources.length === 1
+    ? value !== 'fuse' && (value !== 'replace' || sources[0]!.images.length > 0)
+    : value === 'fuse' && sources.length >= 2 && sources.length <= 8);
+  const operation = command.operation ?? inferredOperation ?? (matching.length === 1 ? matching[0] : undefined);
+  const candidatesForQuestion: readonly SolutionTaskInput['operation'][] = matching.length ? matching : sources.length === 1 && /增加|加入|丰富|\badd\b/iu.test(text)
+    ? ['revise', 'append'] as const : eligible;
+  const compatibleChoices = eligible.filter(value => candidatesForQuestion.includes(value));
+  const choices = !operation && text ? (compatibleChoices.length ? compatibleChoices : eligible) : [];
+  const replacement = item.replacement || (candidates.length === 1 ? candidates[0]?.id
+    : /主视觉|封面|\b(?:hero|cover)\b/iu.test(text) ? sources[0]?.heroId
+    : sources[0]?.images.length === 1 ? sources[0].images[0]?.id : undefined);
+  const countKnown = command.count !== undefined || item.outputCount !== undefined || raw !== undefined;
+  const canRun = Boolean(operation && eligible.includes(operation) &&
     (operation !== 'replace' || sources[0]?.images.some(image => image.id === replacement)) &&
-    (operation !== 'split' || [2, 3, 4].includes(outputCount));
-  return { operation, outputCount, replacement, canRun };
+    (operation !== 'split' || (countKnown && [2, 3, 4].includes(outputCount))));
+  return { operation, outputCount, countKnown, replacement, canRun, choices, eligible };
 }
 
-export function SolutionPrompt({ item, sources, busy, update, moveInput }: {
+export function SolutionPrompt({ item, sources, busy, update, moveInput, resolution }: {
   item: CanvasElementState; sources: SolutionVersion[]; busy: boolean;
-  update: (fields: Partial<CanvasElementState>) => void; moveInput: (index: number) => void;
+  update: (fields: Partial<CanvasElementState>) => void; moveInput: (index: number) => void; resolution: ReturnType<typeof solutionPromptOptions>;
 }) {
-  const { t } = useI18n();
-  const { operation, outputCount, replacement, canRun } = solutionPromptOptions(item, sources);
-  const command = promptCommand(item.text ?? '');
+  const { t, language } = useI18n();
+  const { operation, outputCount, countKnown, replacement, canRun, choices } = resolution;
   return <>
     {sources.length > 0 && <>
-      <label>{t('Operation')} <select disabled={busy || Boolean(command.operation)} value={command.operation ?? item.operation ?? ''} onChange={event => update({ operation: (event.target.value || undefined) as SolutionTaskInput['operation'] | undefined })}>
-        <option value="">{t('Auto')} · {t(operations.find(([value]) => value === operation)![1])}</option>
-        {operations.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
-      </select></label>
-      {operation === 'split' && <label>{t('Outputs')} <select disabled={busy || command.count !== undefined} value={outputCount} onChange={event => update({ outputCount: Number(event.target.value) })}>{![2, 3, 4].includes(outputCount) && <option value={outputCount}>{t('Select output count')}</option>}{[2, 3, 4].map(count => <option key={count}>{count}</option>)}</select></label>}
+      {choices.length > 0 && <fieldset className="prompt-operation-choices" disabled={busy}>
+        <legend>{t('Which operation do you want?')}</legend>
+        {operations.filter(([value]) => choices.includes(value)).map(([value, label]) =>
+          <button type="button" key={value} onClick={() => update({ text: `${operationCommand(value, language === 'zh')} ${item.text?.trim() ?? ''}`, operation: undefined })}>{t(label)}</button>)}
+      </fieldset>}
+      {operation === 'split' && (!countKnown || ![2, 3, 4].includes(outputCount)) && <fieldset className="prompt-operation-choices" disabled={busy}>
+        <legend>{t('How many versions should be created?')}</legend>
+        {[2, 3, 4].map(count => <button type="button" key={count} onClick={() => update({ outputCount: count })}>{count}</button>)}
+      </fieldset>}
       {operation === 'replace' && <label>{t('Image to replace')} <select disabled={busy} value={replacement ?? ''} onChange={event => update({ replacement: event.target.value })}>
         <option value="">{t('Select image')}</option>{sources[0]?.images.map(image => <option key={image.id}>{image.id}</option>)}
       </select></label>}
-      <ol className="solution-inputs" aria-label={t('Input versions')}>
+      <ul className="solution-inputs" aria-label={t('Input versions')}>
         {sources.map((version, index) => <li key={version.id}>
+          <small className="prompt-source-role">{t(solutionSourceRole(sources.length, index))}</small>
           <span title={version.title}>{version.title}</span>
           {sources.length > 1 && <><input aria-label={`${t('Source role')} ${index + 1}`} placeholder={t(index === 0 ? 'Primary solution' : 'Source role')} value={item.sourceNotes?.[version.id] ?? ''} disabled={busy} onChange={event => update({ sourceNotes: { ...item.sourceNotes, [version.id]: event.target.value } })} />
             {index > 0 && <button disabled={busy} aria-label={t('Move source up')} onClick={() => moveInput(index)}><ArrowUp size={12} /></button>}</>}
         </li>)}
-      </ol>
+      </ul>
 
       {operation === 'replace' && !replacement && <small>{t('Select the image to replace.')}</small>}
       {operation === 'fuse' && !canRun && <small>{t('Connect two to eight versions to fuse them.')}</small>}
-      {sources.length > 1 && operation !== 'fuse' && <small>{t('This operation needs one solution input.')}</small>}
+      {sources.length > 8 && !operation && <small>{t('Connect two to eight versions to fuse them.')}</small>}
+      {sources.length > 1 && operation && operation !== 'fuse' && <small>{t('This operation needs one solution input.')}</small>}
     </>}
   </>;
 }

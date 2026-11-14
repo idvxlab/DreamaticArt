@@ -1,3 +1,4 @@
+import { classifySolutionIntent } from './solution-intent.js';
 import { listSolutionTasks, projectSolutionTasksInProgress, solutionTaskAction, solutionTasksInProgress, stopSolutionTasks, submitSolutionTask } from './solution-tasks.js';
 import { getFinalSolutionId, listSolutionVersions, readSolutionFile, setFinalSolutionId } from './solution-versions.js';
 import { finalizeImageEdit } from './image-edit-output.js';
@@ -449,6 +450,10 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
         });
         response.end(bytes);
       }
+      return;
+    }
+    if (request.method === 'POST' && /^\/api\/runs\/[^/]+\/solution-intent$/.test(url.pathname)) {
+      json(response, 200, await classifySolutionIntent(record(await body(request))));
       return;
     }
     const solutionTaskMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/solution-tasks(?:\/([^/]+)\/(cancel|retry))?$/);

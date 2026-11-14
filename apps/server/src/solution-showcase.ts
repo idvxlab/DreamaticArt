@@ -8,7 +8,7 @@ import { createBuilderTextReadTool, createShowcaseTools, normalizeShowcaseHtml, 
 
 export async function composeSolutionShowcase(options: {
   repoRoot: string; staging: string; request: string; signal: AbortSignal;
-  designText: string; generated: Record<string, GeneratedShowcaseImage>; previousExhibition: string; previousHtml?: Buffer; materialChanges?: { ids: string[]; kind: 'added' | 'replaced' }; videoTitles?: Record<string, string>; validateDirection?: (direction: import('./showcase.js').ShowcaseDirection) => void; report?: EditActivityReporter;
+  designText: string; compactContext?: boolean; generated: Record<string, GeneratedShowcaseImage>; previousExhibition: string; previousHtml?: Buffer; materialChanges?: { ids: string[]; kind: 'added' | 'replaced' }; videoTitles?: Record<string, string>; validateDirection?: (direction: import('./showcase.js').ShowcaseDirection) => void; report?: EditActivityReporter;
 }) {
   const { repoRoot, staging, request, signal, designText, generated, previousExhibition, previousHtml } = options;
   const images = [
@@ -42,8 +42,11 @@ export async function composeSolutionShowcase(options: {
   const skill = agent.skillCatalog.entries.find(entry => entry.skill.name === 'concept-showcase-storytelling' && !entry.skill.disableModelInvocation);
   const skillReference = skill ? `\n\nApproved exhibition Skill file (use this exact path with read): ${skill.skill.filePath}` : '';
   let output: string;
+  const designContext = options.compactContext
+    ? 'Use the inventory descriptions and previous exhibition direction. Read design.md for any additional design details needed.'
+    : `Design document:\n${designText}`;
   try {
-    output = await promptSolutionModel(agent, `Showcase revision request:\n${request}\n\nREQUIRED WORK INVENTORY (${inventory.length} entries, include every ID exactly once):\n${JSON.stringify(inventory)}${skillReference}\n\nDesign document:\n${designText}\n\nPrevious exhibition direction:\n${previousExhibition}`, signal, 'builder', options.report, {
+    output = await promptSolutionModel(agent, `Showcase revision request:\n${request}\n\nREQUIRED WORK INVENTORY (${inventory.length} entries, include every ID exactly once):\n${JSON.stringify(inventory)}${skillReference}\n\n${designContext}\n\nPrevious exhibition direction:\n${previousExhibition}`, signal, 'builder', options.report, {
       shouldStop: () => !showcase.direction && rejected >= 3,
       retryIf: () => !showcase.direction,
       failureMessage: () => rejection ?? 'Builder did not record the exhibition direction',
