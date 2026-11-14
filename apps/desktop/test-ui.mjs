@@ -56,13 +56,12 @@ try {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/stream')) { await route.fulfill({contentType:'text/event-stream',body:''});return; }
-    const value = url.pathname === '/api/health' ? {ok:true} : url.pathname === '/api/sessions' ? [{id:'share-session',title:fixtureRun.title,running:false,messages:[],projectId:fixtureRun.id}] : url.pathname === '/api/runs' ? [fixtureRun] : url.pathname === '/api/runs/share-fixture' ? fixtureRun : url.pathname.endsWith('/publish') ? {site:'https://www.dreamatic.art',published:true,mayExist:true,inProgress:false,receipt:{projectId:'published-desktop',previewUrl:publicationLink,galleryUrl:'https://www.dreamatic.art/#gallery'}} : url.pathname.endsWith('/canvas') ? null : [];
+    const value = url.pathname === '/api/health' ? {ok:true} : url.pathname === '/api/sessions' ? [{id:'share-session',title:fixtureRun.title,running:false,messages:[],projectId:fixtureRun.id}] : url.pathname === '/api/runs' ? [fixtureRun] : url.pathname === '/api/runs/share-fixture' ? fixtureRun : url.pathname.endsWith('/publish') ? {site:'https://www.dreamatic.art',published:true,mayExist:true,inProgress:false,receipt:{projectId:'published-desktop',previewUrl:publicationLink,galleryUrl:'https://www.dreamatic.art/#gallery'}} : url.pathname.endsWith('/final-solution') ? {versionId:null} : url.pathname.endsWith('/canvas') ? null : [];
     await route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
   });
   await page.route('**/assets/**', route => route.fulfill({contentType:'text/html',body:'<h1>Desktop preview</h1>'}));
   await page.reload();await page.getByRole('button',{name:'Preview',exact:true}).click();
-  await page.waitForFunction(()=>!document.querySelector('.preview-actions button:last-child').disabled);
-  await page.getByRole('button',{name:'Share',exact:true}).click();
+  await page.getByRole('button',{name:'Share',exact:true}).click({ timeout: 15000 });
   await page.getByText('Published project link copied',{exact:true}).waitFor();
   assert.equal(await app.evaluate(({clipboard})=>clipboard.readText()),publicationLink);
   assert.equal(await app.evaluate(()=>globalThis.sharedExternalLink),publicationLink);

@@ -40,6 +40,7 @@ test('project switches isolate live callbacks, completion, stop and delayed sess
     export async function getFinalSolution(){return {versionId:null}}
     export async function selectFinalSolution(){throw new Error('Not used in this fixture')}
     export async function listSolutionTasks(){return []}
+    export async function classifySolutionIntent(){throw new Error('Not used in this fixture')}
     export function solutionFileUrl(){return ""}
     export async function submitSolutionTask(){throw new Error('Not used in this fixture')}
     export async function solutionTaskAction(){throw new Error('Not used in this fixture')}
