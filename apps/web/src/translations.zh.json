@@ -1,4 +1,9 @@
 {
+  "Builder generation timeout (ms)": "Builder 生成时限（毫秒）",
+  "Restore exhibition direction": "恢复已验收展陈方向",
+  "Restore revision plan": "恢复已验收计划",
+  "Restore image": "恢复已完成图片",
+  "Restore showcase": "恢复已完成展示",
   "Selected solution": "选中的方案",
   "Project context": "项目上下文",
   "Asset scope": "素材范围",

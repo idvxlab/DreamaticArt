@@ -1,3 +1,4 @@
+import { checkpointHash, readCheckpoint, validCheckpointImage, restoreShowcase, saveShowcase } from './solution-checkpoint.js';
 import type { SolutionImageProgress } from '@dreamatic/project-data';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -6,7 +7,7 @@ import { Type } from 'typebox';
 import { createDreamaticAgent } from './agent-session.js';
 import { bindFusionCitations, fusionCitationDirectory } from './design-citations.js';
 import { dimensions, imageSections, plannedImages } from './design-images.js';
-import { imageCapabilityInfo, setting } from './design-pipeline.js';
+import { atomic, imageCapabilityInfo, setting } from './design-pipeline.js';
 import { imageBytesKind, imageEditSettings } from './image-edit.js';
 import { planImageEdit } from './image-edit-plan.js';
 import { imageDimensions } from './image-edit-size.js';
@@ -314,7 +315,36 @@ export async function buildSolutionRevision(options: {
     design: (await read(version, version.designPath)).toString('utf8'),
     exhibition: version.exhibitionPath ? (await read(version, version.exhibitionPath)).toString('utf8') : '',
   })));
-  const outputPlans = await plans({ ...options, sources });
+  const planKey = checkpointHash([1, options.operation, request, options.outputCount, options.replacement, options.sourceNotes,
+    parents.map(parent => [parent.id, parent.files])]);
+  const workRoot = join(staging, planKey);
+  await mkdir(workRoot, { recursive: true });
+  const planFile = join(workRoot, '.plan.json');
+  const savedPlan = await readCheckpoint<{ key: string; digest: string; plans: OutputPlan[] }>(planFile);
+  let outputPlans: OutputPlan[] | undefined;
+  if (savedPlan?.key === planKey && savedPlan.digest === checkpointHash(savedPlan.plans)) {
+    try {
+      if (savedPlan.plans.length !== options.outputCount) throw new Error('Incomplete saved plan');
+      for (const output of savedPlan.plans) {
+        const images = plannedImages(output.design);
+        if (images.length !== output.assets.length || new Set(output.assets.map(asset => asset.id)).size !== images.length) throw new Error('Incomplete saved assets');
+        for (const image of images) {
+          const asset = output.assets.find(asset => asset.id === image.id);
+          if (!asset || !['reuse', 'edit', 'generate'].includes(asset.action)) throw new Error('Invalid saved asset');
+          if (asset.action !== 'generate' && !parents[(asset.source ?? 0) - 1]?.images.some(source => source.id === asset.imageId)) throw new Error('Invalid saved source');
+        }
+      }
+      outputPlans = savedPlan.plans;
+    } catch { /* Regenerate an invalid plan without discarding valid image files. */ }
+  }
+  if (outputPlans) options.report?.({ actor: 'system', label: 'Restore revision plan', state: 'completed' });
+  else {
+    outputPlans = await plans({ ...options, sources, staging: workRoot });
+    await atomic(planFile, { key: planKey, digest: checkpointHash(outputPlans), plans: outputPlans });
+  }
+  const imageConfig = ['DREAMATIC_IMAGE_MODEL', 'DREAMATIC_IMAGE_BASE_URL', 'DREAMATIC_IMAGE_GENERATION_ENDPOINT',
+    'DREAMATIC_IMAGE_RESPONSE_FORMAT', 'DREAMATIC_IMAGE_DEFAULT_SIZE', 'DREAMATIC_IMAGE_EDIT_MODEL',
+    'DREAMATIC_IMAGE_EDIT_ENDPOINT', 'DREAMATIC_IMAGE_EDIT_RESPONSE_FORMAT', 'DREAMATIC_IMAGE_EDIT_SIZE', 'DREAMATIC_IMAGE_EDIT_CAPABILITIES'].map(key => setting(key));
   const imageProgress: SolutionImageProgress = {
     totals: { reuse: 0, edit: 0, generate: 0 },
     completed: { reuse: 0, edit: 0, generate: 0 },
@@ -323,7 +353,7 @@ export async function buildSolutionRevision(options: {
   const deliveries: SolutionDelivery[] = [];
   for (const [index, output] of outputPlans.entries()) {
     await progress('images', index, imageProgress);
-    const outputRoot = join(staging, `output-${index + 1}`);
+    const outputRoot = join(workRoot, `output-${index + 1}`);
     await mkdir(join(outputRoot, 'artifacts'), { recursive: true });
     const generated: Record<string, GeneratedShowcaseImage> = Object.create(null);
     for (const image of plannedImages(output.design)) {
@@ -332,6 +362,16 @@ export async function buildSolutionRevision(options: {
       const source = sources[(asset.source ?? 0) - 1]?.version;
       const reference = source?.images.find(entry => entry.id === asset.imageId);
       const original = source && reference ? await read(source, reference.path) : undefined;
+      const imageKey = checkpointHash([image, asset, reference && source?.files[reference.path], imageConfig, imageEditSettings()]);
+      const imageFile = join(outputRoot, `.image-${image.id}.json`);
+      const savedImage = await readCheckpoint<{ key: string; image: GeneratedShowcaseImage }>(imageFile);
+      if (savedImage?.key === imageKey && await validCheckpointImage(outputRoot, savedImage.image)) {
+        generated[image.id] = savedImage.image;
+        imageProgress.completed[asset.action]++;
+        options.report?.({ actor: 'image', label: 'Restore image', state: 'completed', detail: image.id });
+        await progress('images', index, imageProgress);
+        continue;
+      }
       const { bytes, extension } = asset.action === 'reuse'
         ? { bytes: original!, extension: extname(reference!.path).slice(1) }
         : await produceImage(image, asset.action === 'edit' ? original : undefined, signal, options.report);
@@ -341,6 +381,7 @@ export async function buildSolutionRevision(options: {
         ? reference.path : `artifacts/${image.id}-${digest.slice(0, 12)}.${extension}`;
       await writeFile(join(outputRoot, path), bytes);
       generated[image.id] = { path, digest };
+      await atomic(imageFile, { key: imageKey, image: generated[image.id] });
       imageProgress.completed[asset.action]++;
       await progress('images', index, imageProgress);
     }
@@ -361,6 +402,13 @@ export async function buildSolutionRevision(options: {
       }
     }
     await progress('showcase', index);
+    const showcaseKey = checkpointHash([output.design, generated, request, options.operation, sources.map(source => source.exhibition)]);
+    const recovered = await restoreShowcase(outputRoot, showcaseKey, generated);
+    if (recovered) {
+      deliveries.push(recovered);
+      options.report?.({ actor: 'system', label: 'Restore showcase', state: 'completed' });
+      continue;
+    }
     const previousHtml = parents.length === 1 ? await read(parents[0]!, parents[0]!.showcasePath) : undefined;
     if (options.operation === 'replace' && previousHtml && parents[0]!.works && sources[0]!.exhibition) {
       const parent = parents[0]!;
@@ -375,21 +423,25 @@ export async function buildSolutionRevision(options: {
         await validateShowcaseHtml(outputRoot, html, direction, generated);
         validateVersionShowcaseResources(html, generated);
         options.report?.({ actor: 'system', label: 'Reuse showcase', state: 'completed' });
-        deliveries.push({ designText, html, direction, generated, staging: outputRoot, videoTitles });
+        const delivery = { designText, html, direction, generated, staging: outputRoot, videoTitles };
+        await saveShowcase(showcaseKey, delivery);
+        deliveries.push(delivery);
         continue;
       } catch {
         options.report?.({ actor: 'system', label: 'Rebuild showcase', state: 'started', detail: 'The previous showcase could not be safely reused.' });
       }
     }
-    deliveries.push(await composeSolutionShowcase({
+    const delivery = await composeSolutionShowcase({
       repoRoot, staging: outputRoot, signal, request, ...(options.report ? { report: options.report } : {}),
       designText: ['recompose', 'append'].includes(options.operation) ? output.design : includeVersionVideos(output.design, videoTitles),
       generated, videoTitles,
-      compactContext: options.operation === 'replace',
+      compactContext: true,
       ...(options.operation === 'append' ? { materialChanges: { kind: 'added' as const, ids: output.assets.filter(asset => asset.action === 'generate').map(asset => asset.id) } } : {}),
       previousExhibition: sources.map(({ exhibition }, ordinal) => `Source ${ordinal + 1}:\n${exhibition}`).join('\n\n'),
       ...(previousHtml ? { previousHtml } : {}),
-    }));
+    });
+    await saveShowcase(showcaseKey, delivery);
+    deliveries.push(delivery);
   }
   return deliveries;
 }

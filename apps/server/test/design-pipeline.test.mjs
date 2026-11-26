@@ -39,7 +39,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  const calls = [];
  let stalledPlanningCalls = 0, persistentStalls = 0;
  let shouldClarify = true;
- let skipPlan = false, failSolutionOutput = false, imageEdits = 0, imageRequests = 0, brokenReferences = false, failHero = false, heroFailureRequests = 0, onlyMissingOnResume = false;
+ let failHtml = false, skipPlan = false, failSolutionOutput = false, imageEdits = 0, imageRequests = 0, brokenReferences = false, failHero = false, heroFailureRequests = 0, onlyMissingOnResume = false;
  const server = createServer(async (req,res) => {
   let body=''; for await(const chunk of req) body += chunk;
   if (req.url.endsWith('/images/edits')) {
@@ -160,20 +160,20 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
   }
 
   const generationText=data.messages.find(m=>m.role==='tool' && m.tool_call_id==='generate')?.content || '';
-  const appended = recompose && data.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('## Image: lantern'));
+  const appended = recompose && data.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('lantern'));
   const imageTags=['hero','detail',...(appended ? ['lantern'] : [])].map(id=>`<img src="${generationText.match(new RegExp(id+': (dreamatic-image:[^\\s]+)'))?.[1] || 'dreamatic-image:'+id}">`).join('');
   const result = stage==='orchestrator' ? '# Aurora\nA sustainable lamp.' : stage==='researcher' ? (brokenReferences ? '# Research\nUncertain evidence [8].\n## References\n[1] Known source. https://example.org/background\n[1] Different source with the same id. URL unavailable\n' : '# Research\nBackground source: https://example.org/background\n\n## References\n[1] Supporting evidence. https://example.org/support\n[2] Background reading. https://example.org/background\n') : stage==='designer' ? (brokenReferences ? '# Concept\nUnresolved evidence [77].\n' : '')+design.replace('768x1024','1024x1024')+'\n## References\n[2] Rewritten bibliography. https://wrong.example/source\n' : recompose ? `<!doctype html><html><body><h1>Revised exhibition</h1>${imageTags}</body></html>` : "Now I will compose the complete exhibition HTML.\n\n```html\n"+`<!doctype html><html><body>${imageTags}</body></html>`+"\n```\nThe exhibition is ready.";
   const needsRead = !recompose && !data.messages.some(m=>m.role==='tool' && m.tool_call_id===`read-${stage}`);
   const classify = ['orchestrator','designer'].includes(stage) && !data.messages.some(m=>m.role==='tool' && m.tool_call_id==='classification');
   const tool = stage === 'builder' && !recompose && !data.messages.some(m=>m.role==='tool' && m.tool_call_id==='generate');
   const rejectOutput = failSolutionOutput && JSON.stringify(data.messages).includes('# split version 2');
-  const plan = stage==='builder' && !skipPlan && !rejectOutput && !data.messages.some(m=>m.role==='tool' && m.tool_call_id==='plan');
+  const plan = stage==='builder' && !JSON.stringify(data.messages).includes('Accepted exhibition direction:') && !skipPlan && !rejectOutput && !data.messages.some(m=>m.role==='tool' && m.tool_call_id==='plan');
   const toolCall=(id,name,args)=>({tool_calls:[{index:0,id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
   const delta = needsRead ? toolCall(`read-${stage}`,'read',{path:join(process.cwd(),'apps/server/prompts',`${stage}.md`)})
     : classify ? toolCall('classification','set_project_classification',{primary:stage==='designer'?'product':'visual',secondary:[]})
     : tool ? toolCall('generate','image_generate',{ids:onlyMissingOnResume?['hero']:['hero','detail']})
     : plan ? toolCall('plan','plan_showcase',{heroId:'hero',works:[{id:'hero',role:'hero',section:'Everyday light',purpose:'Introduce the concept'},{id:'detail',role:'detail',section:'Material logic',purpose:'Explain construction'},...(appended ? [{id:'lantern',role:'detail',section:'Supplement',purpose:'Show the new installation'}] : [])],direction:recompose ? '## Art direction\nA revised exhibition.' : '## Thesis\nA sustainable lamp in everyday use.\n## Art direction\nA warm light field, quiet typography and a dominant full-view hero.\n## Sequence\nHero followed by the complete detail study and concise material rationale.'})
-    : {content:result};
+    : {content:failHtml && recompose ? '<!doctype html><html><body>Interrupted output' : result};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   const chunk = {id:'test',object:'chat.completion.chunk',created:1,model:'fixture',choices:[{index:0,delta:{role:'assistant',...delta},finish_reason:null}]};
   res.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -301,6 +301,9 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  const split = await waitForSolution(splitInput.id);
  assert.equal(split.status, 'succeeded', split.error);
  assert.equal(split.outputIds.length, 2);
+ assert.ok(split.activity[1].events.some(event => event.label === 'Restore revision plan'));
+ assert.ok(split.activity[1].events.some(event => event.label === 'Restore showcase'));
+ assert.ok(!split.activity[1].events.some(event => event.actor === 'editor'));
  assert.deepEqual(split.imageProgress, { totals: { reuse: 4, edit: 0, generate: 0 }, completed: { reuse: 4, edit: 0, generate: 0 } });
  currentVersions = await listSolutionVersions(root, 'project');
  const fusedVersion = currentVersions.find(version => version.id === fused.outputId);
@@ -313,7 +316,7 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
   assert.deepEqual(detail, { ...sourceDetail, introduction: `Material study for branch ${index + 1}` });
   assert.equal(child.files[child.images.find(image => image.id === 'detail').path], fusedVersion.files[fusedVersion.images.find(image => image.id === 'detail').path]);
  }
- assert.ok(split.activity[0].events.some(event => event.label === 'Inherited image specifications' && event.detail.includes('Output 2, image "detail"')));
+ assert.ok(split.activity.flatMap(attempt => attempt.events).some(event => event.label === 'Inherited image specifications' && event.detail.includes('Output 2, image "detail"')));
  assert.equal(currentVersions.length, 6);
  process.env.DREAMATIC_IMAGE_EDIT_ENABLED = 'false';
  const disabledInput = { ...taskInput, id: 'replace-disabled', operation: 'replace', replacement: 'hero' };
@@ -385,9 +388,19 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  assert.equal(imageEdits, 2, 'failed planning never applies an image edit');
  const appendInput = { ...taskInput, id: 'append-lantern', operation: 'append', prompt: 'Add a lantern installation' };
  const beforeAppend = imageRequests;
+ skipPlan = true;
  await submitSolutionTask(root, root, 'project', appendInput);
+ const failedAppend = await waitForSolution(appendInput.id);
+ assert.equal(failedAppend.status, 'failed');
+ assert.equal(imageRequests, beforeAppend + 1);
+ skipPlan = false;
+ await solutionTaskAction(root, root, 'project', appendInput.id, 'retry');
+
  const appendedSolution = await waitForSolution(appendInput.id);
  assert.equal(appendedSolution.status, 'succeeded', appendedSolution.error);
+ await assert.rejects(readdir(join(root, 'runs/project/solution-tasks/.checkpoints', appendInput.id)), { code: 'ENOENT' });
+ assert.ok(appendedSolution.activity[1].events.some(event => event.label === 'Restore image' && event.detail === 'lantern'));
+ assert.ok(!appendedSolution.activity[1].events.some(event => event.actor === 'editor'));
  assert.equal(imageRequests, beforeAppend + 1);
  assert.equal(imageEdits, 2);
  const appendedVersion = (await listSolutionVersions(root, 'project')).find(version => version.id === appendedSolution.outputId);
@@ -397,6 +410,18 @@ test('Pi SDK completes four stages, reuses a valid run and recovers a changed Ma
  assert.match(appendedMarkdown.subarray(originalMarkdown.length).toString(), /^## Supplemental concept$/m);
  assert.match(appendedMarkdown.toString(), /## Image: lantern/);
  for (const image of parent.images) assert.equal(appendedVersion.files[image.path], parent.files[image.path]);
+ const directionInput = { ...taskInput, id: 'restore-direction' };
+ failHtml = true;
+ await submitSolutionTask(root, root, 'project', directionInput);
+ const failedHtml = await waitForSolution(directionInput.id);
+ assert.equal(failedHtml.status, 'failed');
+ assert.ok(failedHtml.activity[0].events.some(event => event.label === 'plan_showcase' && event.state === 'completed'));
+ failHtml = false;
+ await solutionTaskAction(root, root, 'project', directionInput.id, 'retry');
+ const restoredDirection = await waitForSolution(directionInput.id);
+ assert.equal(restoredDirection.status, 'succeeded', restoredDirection.error);
+ assert.ok(restoredDirection.activity[1].events.some(event => event.label === 'Restore exhibition direction'));
+ assert.ok(!restoredDirection.activity[1].events.some(event => event.label === 'plan_showcase'));
  const cancelInput = { ...taskInput, id: 'cancel-revision', operation: 'revise' };
  const cancellable = await submitSolutionTask(root, root, 'project', cancelInput);
  await solutionTaskAction(root, root, 'project', cancelInput.id, 'cancel');

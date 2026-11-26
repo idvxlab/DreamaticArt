@@ -31,7 +31,7 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
   const abort = () => { void session.abort(); };
   const timer = createModelResponseTimer({
     firstOutputMs: Number(setting(`DREAMATIC_MODEL_TURN_TIMEOUT_MS_${role.toUpperCase()}`) || setting('DREAMATIC_MODEL_TURN_TIMEOUT_MS')),
-    generationMs: Number(setting('DREAMATIC_MODEL_GENERATION_TIMEOUT_MS')),
+    generationMs: Number(setting(`DREAMATIC_MODEL_GENERATION_TIMEOUT_MS_${role.toUpperCase()}`) || setting('DREAMATIC_MODEL_GENERATION_TIMEOUT_MS')),
     idleMs: Number(setting('DREAMATIC_MODEL_IDLE_TIMEOUT_MS')),
     totalMs: Number(setting('DREAMATIC_MODEL_TOTAL_TIMEOUT_MS')),
     onTimeout: abort,
@@ -46,7 +46,10 @@ export async function promptSolutionModel(agent: Awaited<ReturnType<typeof creat
       timeoutReported ||= Boolean(timer.failure);
       report?.({
         actor: role, label: 'Model response', state: failed ? 'failed' : 'completed',
-        ...(failed ? { detail: responseFailureDetail(timer, event.message.stopReason, httpStream?.describe()) } : {}),
+        ...(failed ? { detail: [
+          responseFailureDetail(timer, event.message.stopReason, httpStream?.describe()),
+          ...(event.message.errorMessage ? [event.message.errorMessage.slice(0, 1200)] : []),
+        ].join(' · ') } : {}),
       }, modelActivityUsage(event.message.usage));
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       const detail = event.type === 'tool_execution_end' && event.isError && submissionTools.has(event.toolName)

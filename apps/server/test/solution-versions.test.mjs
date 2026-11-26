@@ -151,8 +151,11 @@ test('solution HTTP tasks survive restart and publish integrated or replaced mat
     const prompt = typeof content === 'string' ? content : content.find(block => block.type === 'text').text;
     const material = prompt.split('\n')[1]?.startsWith('{') ? JSON.parse(prompt.split('\n')[1]) : undefined;
     const design = prompt.split('Design document:\n')[1]?.split('\n\nPrevious exhibition direction:')[0] ?? '';
-    const images = [...design.matchAll(/^## Image: ([a-zA-Z0-9_-]+)/gm)].map(match => match[1]);
-    const videos = [...(design.split('## Showcase videos')[1] ?? '').matchAll(/^- ([a-zA-Z0-9_-]+):/gm)].map(match => match[1]);
+    const inventoryMatch = prompt.match(/^REQUIRED WORK INVENTORY[^\n]*\n([^\n]+)/m);
+    const inventory = inventoryMatch ? JSON.parse(inventoryMatch[1]) : undefined;
+    const images = inventory ? inventory.filter(work => work.kind === 'image').map(work => work.id)
+      : [...design.matchAll(/^## Image: ([a-zA-Z0-9_-]+)/gm)].map(match => match[1]);
+    const videos = inventory ? inventory.filter(work => work.kind === 'video').map(work => work.id) : [];
     const works = [...images, ...videos].map(id => ({ id, role: id === 'lamp' ? 'hero' : 'detail', section: material?.requestedSection ?? 'Overview', purpose: 'Introduce the lamp' }));
     if (!results.length) {
       const inventory = prompt.match(/^REQUIRED WORK INVENTORY[^\n]*\n([^\n]+)/m);
@@ -227,6 +230,9 @@ test('solution HTTP tasks survive restart and publish integrated or replaced mat
   const retried = await (await get('/solution-tasks/restart/retry', {})).json();
   assert.equal(retried.outputId, submitted.outputId);
   await poll(tasks, values => values.some(task => task.id === 'restart' && task.status === 'succeeded'));
+  const resumed = (await tasks()).find(task => task.id === 'restart');
+  assert.ok(resumed.activity[1].events.some(event => event.label === 'Restore revision plan'));
+  assert.ok(resumed.activity[1].events.some(event => event.label === 'Restore image'));
   await stop();
   await boot();
   assert.equal((await tasks()).find(task => task.id === 'restart').status, 'succeeded');
@@ -314,4 +320,25 @@ test('solution HTTP tasks survive restart and publish integrated or replaced mat
   assert.equal(wrongType.ok, false);
   assert.match(await wrongType.text(), /same type/);
 
+});
+
+test('showcase checkpoints reject changed media and malformed saved data', async t => {
+  const { saveShowcase, restoreShowcase } = await import('../dist/solution-checkpoint.js');
+  const root = await mkdtemp(join(tmpdir(), 'dreamatic-checkpoint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'artifacts'));
+  await writeFile(join(root, 'artifacts/hero.png'), 'image');
+  const generated = { hero: { path: 'artifacts/hero.png', digest: digest('image') } };
+  const delivery = {
+    staging: root, designText: '# Design', html: '<html><img src="../artifacts/hero.png"></html>',
+    direction: { heroId: 'hero', works: [{ id: 'hero', role: 'hero', section: 'Overview', purpose: 'Introduce' }], markdown: 'Overview' },
+    generated,
+  };
+  await saveShowcase('key', delivery);
+  assert.ok(await restoreShowcase(root, 'key', generated));
+  assert.equal(await restoreShowcase(root, 'another-key', generated), undefined);
+  await writeFile(join(root, 'artifacts/hero.png'), 'partial');
+  assert.equal(await restoreShowcase(root, 'key', generated), undefined);
+  await writeFile(join(root, '.showcase-checkpoint.json'), '{');
+  assert.equal(await restoreShowcase(root, 'key', generated), undefined);
 });

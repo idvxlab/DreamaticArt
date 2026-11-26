@@ -182,6 +182,7 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
     const saved = await readTask(path);
     if (saved) {
       const previous = verify(await taskStatus(workspace, runId, path, saved, false));
+      if (previous.status === 'succeeded') await rm(join(directory, '.checkpoints', input.id), { recursive: true, force: true });
       if (!retry || previous.status === 'succeeded') {
         active.delete(path);
         return previous;
@@ -219,7 +220,8 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
         signal.throwIfAborted();
         task.status = 'running';
         await activity.start();
-        staging = await mkdtemp(join(directory, '.build-'));
+        staging = task.materialEdit ? await mkdtemp(join(directory, '.build-')) : join(directory, '.checkpoints', task.id);
+        await mkdir(staging, { recursive: true });
         if (task.materialEdit) { task.phase = 'showcase'; await activity.write(); }
         const deliveries = task.materialEdit && task.materialSnapshot
           ? [await buildMaterialRevision({ repoRoot, workspace, parent: parents[0]!, directory, staging, edit: task.materialEdit, snapshot: task.materialSnapshot, signal, report: activity.report })]
@@ -250,7 +252,7 @@ async function start(repoRoot: string, workspace: string, runId: string, input: 
         return;
       } finally {
         try {
-          if (staging) await rm(staging, { recursive: true, force: true });
+          if (staging && (task.materialEdit || task.status === 'succeeded')) await rm(staging, { recursive: true, force: true });
         } finally {
           active.delete(path);
           release?.();
