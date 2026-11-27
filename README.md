@@ -1,6 +1,6 @@
 # Dreamatic · Art
 
-**v2.4.1**
+**v2.4.2**
 
 Dreamatic · Art is an open-source, local-first AI design workbench for web and desktop. It turns a brief into research, design proposals, generated visuals, and static showcase pages. Project files and generated work live in a local workspace.
 
@@ -10,7 +10,14 @@ Dreamatic · Art is an open-source, local-first AI design workbench for web and 
 
 *The final solution in Preview, shown with the Still Light demo project.*
 
-## What's new in v2.4.1
+## What's new in v2.4.2
+
+- **Resume failed revisions.** Revision tasks retain checkpoints for accepted plans, completed images, exhibition directions, and validated showcases. Retrying the same task reuses valid results instead of repeating completed work. Checkpoints are validated before reuse and cleaned up after success.
+- **More time for showcase generation.** Builder now has a dedicated generation allowance of 15 minutes per model response after its first output, configurable in Settings. Provider HTTP timeouts accommodate the configured response budgets; streaming idle and optional total response limits still apply.
+- **Lean showcase context.** Builder receives a compact work inventory and can read the full design document when needed. A restored exhibition direction lets it proceed directly to composing the page.
+- **Clearer recovery and errors.** Activity logs show restored plans, images, exhibition directions, and showcases, with Chinese translations. Failed model responses include provider error details alongside stream diagnostics.
+
+## Previous updates in v2.4.1
 
 - **Append-only editing.** Add content and new images while preserving the original design and media. Reused images inherit their source prompts and dimensions across revisions, fusion, and split outputs.
 - **Faster revisions.** Single-image replacement submits only the target editing instruction and can reuse a validated showcase layout. Accepted plans proceed directly to image processing, reducing model calls and repeated context.
